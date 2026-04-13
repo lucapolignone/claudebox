@@ -205,6 +205,12 @@ Or permanently:
     }
     Write-Ok "CLAUDE_CONFIG_DIR -> $env:CLAUDE_CONFIG_DIR"
 
+    # CLAUDE_PLUGINS_DIR (derived from CLAUDE_CONFIG_DIR)
+    if (-not $env:CLAUDE_PLUGINS_DIR) {
+        $env:CLAUDE_PLUGINS_DIR = "$env:CLAUDE_CONFIG_DIR\plugins"
+    }
+    Write-Ok "CLAUDE_PLUGINS_DIR -> $env:CLAUDE_PLUGINS_DIR"
+
     # CCSTATUSLINE_CONFIG_DIR
     if (-not $env:CCSTATUSLINE_CONFIG_DIR) {
         $ccDefault = "$env:USERPROFILE\.config\ccstatusline"
@@ -287,6 +293,7 @@ function Invoke-Init {
   "workspaceMount": "source=`${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "mounts": [
     "source=`${localEnv:CLAUDE_CONFIG_DIR},target=/host-claude,type=bind,readonly=true,consistency=cached",
+    "source=`${localEnv:CLAUDE_PLUGINS_DIR},target=/host-claude-plugins,type=bind,readonly=true,consistency=cached",
     "source=`${localEnv:CCSTATUSLINE_CONFIG_DIR},target=/host-ccstatusline,type=bind,readonly=true,consistency=cached",
     "source=claudebox-shared-config,target=/home/node/.claude,type=volume",
     "source=claudebox-shared-ccstatusline,target=/home/node/.config/ccstatusline,type=volume",
@@ -295,6 +302,7 @@ function Invoke-Init {
   "remoteUser": "node",
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+    "CLAUDE_PLUGINS_DIR": "/home/node/.claude/plugins",
     "CCSTATUSLINE_CONFIG_DIR": "/home/node/.config/ccstatusline",
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "DEVCONTAINER": "true",
@@ -304,7 +312,7 @@ function Invoke-Init {
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW"
   ],
-  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
+  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -361,6 +369,7 @@ function Invoke-Up {
     }
     $dockerWorkspace        = Convert-ToDockerPath $pwd
     $dockerConfigDir        = Convert-ToDockerPath $env:CLAUDE_CONFIG_DIR
+    $dockerPluginsDir       = Convert-ToDockerPath $env:CLAUDE_PLUGINS_DIR
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
 
     Write-Header "=== Starting devcontainer '$proj' ==="
@@ -423,11 +432,13 @@ function Invoke-Up {
         --cap-add=NET_RAW `
         -v "${dockerWorkspace}:/workspace:cached" `
         -v "${dockerConfigDir}:/host-claude:ro" `
+        -v "${dockerPluginsDir}:/host-claude-plugins:ro" `
         -v "${dockerCcstatuslineDir}:/host-ccstatusline:ro" `
         -v "claudebox-shared-config:/home/node/.claude" `
         -v "claudebox-shared-ccstatusline:/home/node/.config/ccstatusline" `
         -v "claudebox-${proj}-history:/commandhistory" `
         -e CLAUDE_CONFIG_DIR="/home/node/.claude" `
+        -e CLAUDE_PLUGINS_DIR="/home/node/.claude/plugins" `
         -e CCSTATUSLINE_CONFIG_DIR="/home/node/.config/ccstatusline" `
         -w /workspace `
         "claudebox-img-$proj" `
@@ -439,16 +450,43 @@ function Invoke-Up {
     try {
         # Copy config from host to shared volume on first start
         docker exec $cname bash -c 'if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi' | Out-Null
+        # Copy plugins from host on every start (plugins may be updated)
+        docker exec -u root $cname chown -R node:node /home/node/.claude/plugins | Out-Null
+        docker exec $cname bash -c 'cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true' | Out-Null
         # Copy ccstatusline config on first start
         docker exec -u root $cname chown -R node:node /home/node/.config/ccstatusline | Out-Null
         docker exec $cname bash -c 'mkdir -p /home/node/.config/ccstatusline && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' | Out-Null
-        # Fix Windows -> Linux paths in Claude Code JSON config files
+        # Fix host paths -> container paths in Claude Code JSON config files
+        # 1. Structured fix for installed_plugins.json (installPath fields)
+        # 2. Generic regex scan on plugins/, ide/, config/ directories
         # All JS strings use single-quotes: docker exec on Windows strips double-quotes
         docker exec -u node $cname node -e @'
 var fs = require('fs'), path = require('path');
 var DIR = '/home/node/.claude';
+
+// Fix installed_plugins.json - structured approach for installPath fields
+var ip = path.join(DIR, 'plugins/installed_plugins.json');
+if (fs.existsSync(ip)) {
+  try {
+    var data = JSON.parse(fs.readFileSync(ip, 'utf8'));
+    var changed = false;
+    for (var k in data.plugins) {
+      (data.plugins[k] || []).forEach(function(e) {
+        if (e.installPath) {
+          var fixed = e.installPath
+            .replace(/^[A-Za-z]:[\\\/].*?\.claude/, DIR)
+            .replace(/^\/(?:Users|home)\/[^/]+\/\.claude/, DIR);
+          if (fixed !== e.installPath) { e.installPath = fixed; changed = true; }
+        }
+      });
+    }
+    if (changed) fs.writeFileSync(ip, JSON.stringify(data, null, 2), 'utf8');
+  } catch(e) {}
+}
+
+// Generic regex scan for remaining JSON files in known directories
 var DIRS = ['plugins', 'ide', 'config'];
-var RE = /[A-Za-z]:[\\\/][^'\n]*/g;
+var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[^'\n"]*/g;
 function fixFile(f) {
   try {
     var r = fs.readFileSync(f, 'utf8');
@@ -456,7 +494,8 @@ function fixFile(f) {
     if (!RE.test(r)) return;
     RE.lastIndex = 0;
     var x = r.replace(RE, function(m) {
-      return m.replace(/\\/g, '/').replace(/^[A-Za-z]:\/.*?\.claude/, DIR);
+      var p = m.replace(/\\/g, '/');
+      return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^/]+\/).*?\.claude/, DIR);
     });
     if (x !== r) fs.writeFileSync(f, x, 'utf8');
   } catch(e) {}
@@ -570,6 +609,8 @@ function Invoke-Start {
 
     Write-Host "  Config   : " -NoNewline -ForegroundColor DarkGray
     Write-Host $env:CLAUDE_CONFIG_DIR -ForegroundColor White
+    Write-Host "  Plugins  : " -NoNewline -ForegroundColor DarkGray
+    Write-Host "$env:CLAUDE_CONFIG_DIR\plugins" -ForegroundColor White
     Write-Host "  ccstatus : " -NoNewline -ForegroundColor DarkGray
     if ($env:CCSTATUSLINE_CONFIG_DIR -and (Test-Path $env:CCSTATUSLINE_CONFIG_DIR)) {
         Write-Host $env:CCSTATUSLINE_CONFIG_DIR -ForegroundColor White

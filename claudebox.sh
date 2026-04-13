@@ -356,12 +356,35 @@ cmd_up() {
         'if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' >/dev/null
 
     # Fix host paths -> container paths in Claude Code JSON config files
-    # Handles Windows (C:\...), macOS (/Users/...) and Linux (/home/...) paths
+    # 1. Structured fix for installed_plugins.json (installPath fields)
+    # 2. Generic regex scan on plugins/, ide/, config/ directories
     docker exec -u node "$cname" node -e '
 var fs = require("fs"), path = require("path");
 var DIR = "/home/node/.claude";
+
+// Fix installed_plugins.json - structured approach for installPath fields
+var ip = path.join(DIR, "plugins/installed_plugins.json");
+if (fs.existsSync(ip)) {
+  try {
+    var data = JSON.parse(fs.readFileSync(ip, "utf8"));
+    var changed = false;
+    for (var k in data.plugins) {
+      (data.plugins[k] || []).forEach(function(e) {
+        if (e.installPath) {
+          var fixed = e.installPath
+            .replace(/^[A-Za-z]:[\\\/].*?\.claude/, DIR)
+            .replace(/^\/(?:Users|home)\/[^\/]+\/.claude/, DIR);
+          if (fixed !== e.installPath) { e.installPath = fixed; changed = true; }
+        }
+      });
+    }
+    if (changed) fs.writeFileSync(ip, JSON.stringify(data, null, 2), "utf8");
+  } catch(e) {}
+}
+
+// Generic regex scan for remaining JSON files in known directories
 var DIRS = ["plugins", "ide", "config"];
-var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[^"\n]*/g;
+var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[\s\S]*?(?="|\n)/g;
 function fixFile(f) {
   try {
     var r = fs.readFileSync(f, "utf8");
