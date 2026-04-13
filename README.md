@@ -2,6 +2,8 @@
 
 Zero-dependency CLI to spin up an isolated Claude Code devcontainer in any project folder. Windows, macOS and Linux.
 
+![claudebox](https://github.com/user-attachments/assets/a586870c-56c0-4389-b2b3-16cd5fb2fefe)
+
 claudebox downloads the official Anthropic `Dockerfile` and `init-firewall.sh` directly from [`anthropics/claude-code`](https://github.com/anthropics/claude-code), generates a project-specific `devcontainer.json`, mounts your existing Claude Code credentials from the host (read-only), and launches the container with `claude --dangerously-skip-permissions` after verifying isolation is correct.
 
 ---
