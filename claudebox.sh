@@ -355,40 +355,35 @@ cmd_up() {
     docker exec "$cname" bash -c \
         'if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' >/dev/null
 
-    # Fix Windows paths in JSON config files (no-op on macOS/Linux, but run for safety)
+    # Fix host paths -> container paths in Claude Code JSON config files
+    # Handles Windows (C:\...), macOS (/Users/...) and Linux (/home/...) paths
     docker exec -u node "$cname" node -e '
-const fs = require("fs");
-const path = require("path");
-const CLAUDE_DIR = "/home/node/.claude";
-const TARGET_DIRS = ["plugins", "ide", "config"];
-const WIN_PATH_RE = /[A-Za-z]:[\\\/][^"\n]*/g;
-function fixValue(str) {
-  return str.replace(WIN_PATH_RE, match => {
-    let p = match.replace(/\\/g, "/");
-    p = p.replace(/^[A-Za-z]:\/.*?\.claude/, CLAUDE_DIR);
-    return p;
-  });
-}
-function fixJsonFile(filePath) {
+var fs = require("fs"), path = require("path");
+var DIR = "/home/node/.claude";
+var DIRS = ["plugins", "ide", "config"];
+var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[^"\n]*/g;
+function fixFile(f) {
   try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    WIN_PATH_RE.lastIndex = 0;
-    if (!WIN_PATH_RE.test(raw)) return;
-    WIN_PATH_RE.lastIndex = 0;
-    const fixed = fixValue(raw);
-    if (fixed !== raw) fs.writeFileSync(filePath, fixed, "utf8");
-  } catch (e) {}
+    var r = fs.readFileSync(f, "utf8");
+    RE.lastIndex = 0;
+    if (!RE.test(r)) return;
+    RE.lastIndex = 0;
+    var x = r.replace(RE, function(m) {
+      var p = m.replace(/\\/g, "/");
+      return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
+    });
+    if (x !== r) fs.writeFileSync(f, x, "utf8");
+  } catch(e) {}
 }
-function walk(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full);
-    else if (entry.isFile() && entry.name.endsWith(".json")) fixJsonFile(full);
+function walk(d) {
+  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x){return;}
+  for (var i=0;i<e.length;i++) {
+    var p = path.join(d, e[i].name);
+    if (e[i].isDirectory()) walk(p);
+    else if (e[i].name.slice(-5) === ".json") fixFile(p);
   }
 }
-for (const dir of TARGET_DIRS) walk(path.join(CLAUDE_DIR, dir));
+for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
 ' 2>/dev/null || true
 
     # Verify isolation
