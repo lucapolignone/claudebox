@@ -102,15 +102,35 @@ claudebox start
 | `claudebox stop` | Stop the container (without removing it) |
 | `claudebox destroy` | Remove the container, history volume and image for the current project |
 
+### Skip confirmations (`-y`)
+
+All commands that ask for confirmation support the `-y` flag (or `--yes` on macOS/Linux), which automatically answers yes to every prompt and uses defaults for any input:
+
+```powershell
+# Windows
+claudebox start -y       # no prompts at all
+claudebox destroy -y
+claudebox init -y
+```
+
+```bash
+# macOS / Linux
+claudebox start -y
+claudebox start --yes
+```
+
+When `-y` is active the update prompt in `start` defaults to **no update** (safe default — update explicitly with `claudebox update` if needed).
+
 ### Typical workflow
 
 ```bash
 # First time on a project
 cd ~/projects/my-project
-claudebox start          # generates everything and opens claude
+claudebox start -y       # generates everything and opens claude, no questions asked
 
 # Subsequent runs
 claudebox start          # asks whether to update, then starts
+claudebox start -y       # skips all prompts, goes straight to build + run
 # or, to re-attach without rebuilding:
 claudebox shell
 
@@ -119,7 +139,7 @@ claudebox update
 claudebox up
 
 # Full cleanup for this project
-claudebox destroy
+claudebox destroy -y
 ```
 
 ---
