@@ -38,7 +38,7 @@ Restart PowerShell (or run `. $PROFILE`) — the `claudebox` command is now avai
 Download `claudebox.sh`, then run:
 
 ```bash
-bash claudebox.sh
+bash claudebox.sh install
 ```
 
 The script copies itself to `~/.local/bin/claudebox` and adds it to your PATH via `.zshrc` or `.bashrc`.

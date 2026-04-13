@@ -4,10 +4,11 @@
 #
 # Uso:
 #   First run (self-install):
-#     bash claudebox.sh
+#     bash claudebox.sh install
 #
 #   After installation, from any folder:
 #     claudebox start
+#     claudebox start -y     # skip all confirmations
 #     claudebox init
 #     claudebox up
 #     claudebox shell
@@ -16,6 +17,28 @@
 #     claudebox update
 
 set -euo pipefail
+
+# -y / --yes flag: skip all confirmation prompts
+AUTO_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=true ;;
+    esac
+done
+
+confirm_step() {
+    local prompt="$1"
+    $AUTO_YES && return 0
+    read -rp "$prompt" _r
+    [ "${_r,,}" != "n" ]
+}
+
+read_input_or_default() {
+    local prompt="$1" default="$2"
+    if $AUTO_YES; then echo "$default"; return; fi
+    read -rp "$prompt" _v
+    echo "${_v:-$default}"
+}
 
 # ── Colori ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -82,10 +105,14 @@ cmd_install() {
     fi
 
     local dest="$install_dir/claudebox"
-    info "Copying script to: $dest"
-    cp "$source_script" "$dest"
-    chmod +x "$dest"
-    ok "Script copied and made executable"
+    if [ "$(realpath "$source_script" 2>/dev/null || echo "$source_script")" = "$(realpath "$dest" 2>/dev/null || echo "$dest")" ]; then
+        ok "Already installed at: $dest"
+    else
+        info "Copying script to: $dest"
+        cp "$source_script" "$dest"
+        chmod +x "$dest"
+        ok "Script copied and made executable"
+    fi
 
     # Add to PATH if not already there
     local shell_rc=""
@@ -98,7 +125,7 @@ cmd_install() {
     local path_line="export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$PATH\""
     if ! grep -q 'claudebox\|\.local/bin' "$shell_rc" 2>/dev/null; then
         echo "" >> "$shell_rc"
-        echo "# claudebox (added da claudebox.sh)" >> "$shell_rc"
+        echo "# claudebox (added by claudebox.sh)" >> "$shell_rc"
         echo "$path_line" >> "$shell_rc"
         ok "PATH updated in: $shell_rc"
     else
@@ -116,7 +143,8 @@ cmd_install() {
     echo ""
     echo    "  Quick start:"
     echo -e "    cd ~/projects/my-project"
-    echo -e "    claudebox start"
+    echo    "    claudebox start"
+    echo    "    claudebox start -y     # skip all confirmations"
     echo ""
 }
 
@@ -170,8 +198,7 @@ cmd_init() {
 
     if [ -d "$dc_dir" ]; then
         warn "Folder .devcontainer already exists."
-        read -rp "Overwrite existing files? [y/N] " answer
-        [ "${answer,,}" = "y" ] || { info "Cancelled."; return; }
+        confirm_step "Overwrite existing files? [y/N] " || { info "Cancelled."; return; }
     fi
     mkdir -p "$dc_dir"
 
@@ -434,8 +461,7 @@ cmd_start() {
         echo "  Claude Code stores credentials and settings in a dedicated folder."
         echo "  Usually located at: $HOME/.claude"
         echo ""
-        read -rp "  Enter Claude config path [default: $HOME/.claude]: " input_dir
-        input_dir="${input_dir:-$HOME/.claude}"
+        input_dir=$(read_input_or_default "  Enter Claude config path [default: $HOME/.claude]: " "$HOME/.claude")
         if [ ! -d "$input_dir" ]; then
             warn "Folder '$input_dir' does not exist. Creating it now."
             mkdir -p "$input_dir"
@@ -471,8 +497,8 @@ cmd_start() {
         echo ""
         echo "  +- Dockerfile and init-firewall.sh may be outdated."
         echo "  |  Update official Anthropic files before starting?"
-        read -rp "  +- Update? [y/N] " update_answer
-        [ "${update_answer,,}" = "y" ] && do_update=true
+        if $AUTO_YES; then do_update=false
+        else read -rp "  +- Update? [y/N] " update_answer; [ "${update_answer,,}" = "y" ] && do_update=true || true; fi
     fi
 
     # Current state
@@ -500,8 +526,7 @@ cmd_start() {
     echo "    $step. claude -- launch claude --dangerously-skip-permissions"
     echo ""
 
-    read -rp "  Start? [Y/n] " confirm
-    [ "${confirm,,}" = "n" ] && { info "Cancelled."; return; }
+    confirm_step "  Start? [Y/n] " || { info "Cancelled."; return; }
 
     if ! $has_devcontainer; then
         echo ""
@@ -546,8 +571,7 @@ cmd_destroy() {
 
     warn "This will remove the container, history volume and image for '$proj'."
     echo  "  Shared volume 'claudebox-shared-config' is NOT removed (shared across projects)."
-    read -rp "Continue? [y/N] " answer
-    [ "${answer,,}" = "y" ] || { info "Cancelled."; return; }
+    confirm_step "Continue? [y/N] " || { info "Cancelled."; return; }
 
     container_exists && { docker rm -f "$cname" >/dev/null; ok "Container rimosso"; }
     docker volume rm "claudebox-${proj}-history" 2>/dev/null && ok "Volume history rimosso" || true
@@ -583,11 +607,12 @@ cmd_help() {
 
   FIRST RUN
     # Download and install (one-time):
-    bash claudebox.sh
+    bash claudebox.sh install
 
     # Then from any project folder -- all in one command:
     cd ~/projects/my-project
     claudebox start
+    claudebox start -y     # skip all confirmations
 
     # Or step by step:
     claudebox init
@@ -597,8 +622,10 @@ HELP
 }
 
 # ── ENTRY POINT ─────────────────────────────────────────────────────────────────
-case "${1:-install}" in
-    install) cmd_install ;;
+# Strip -y/--yes from positional args
+_cmd="${1:-help}"
+case "$_cmd" in
+    install) cmd_install; exit 0 ;;
     init)    cmd_init    ;;
     up)      cmd_up      ;;
     start)   cmd_start   ;;
