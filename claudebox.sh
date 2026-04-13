@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# claude-dev — devcontainer Claude Code per la cartella corrente
+# claudebox — devcontainer Claude Code per la cartella corrente
 # macOS e Linux/Unix
 #
 # Uso:
 #   Prima esecuzione (auto-installazione):
-#     bash claude-dev.sh
+#     bash claudebox.sh
 #
 #   Dopo l'installazione, da qualsiasi cartella:
-#     claude-dev start
-#     claude-dev init
-#     claude-dev up
-#     claude-dev shell
-#     claude-dev stop
-#     claude-dev destroy
-#     claude-dev update
+#     claudebox start
+#     claudebox init
+#     claudebox up
+#     claudebox shell
+#     claudebox stop
+#     claudebox destroy
+#     claudebox update
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ project_name() {
     basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//'
 }
 
-container_name() { echo "claude-dev-$(project_name)"; }
+container_name() { echo "claudebox-$(project_name)"; }
 
 container_exists() {
     docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$(container_name)"
@@ -61,7 +61,7 @@ download_file() {
 
 # ── AUTO-INSTALLAZIONE ──────────────────────────────────────────────────────────
 cmd_install() {
-    header "=== Installazione claude-dev ==="
+    header "=== Installazione claudebox ==="
 
     local source_script
     source_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -81,7 +81,7 @@ cmd_install() {
         ok "Creata directory: $install_dir"
     fi
 
-    local dest="$install_dir/claude-dev"
+    local dest="$install_dir/claudebox"
     info "Copia script in: $dest"
     cp "$source_script" "$dest"
     chmod +x "$dest"
@@ -96,9 +96,9 @@ cmd_install() {
     fi
 
     local path_line="export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$PATH\""
-    if ! grep -q 'claude-dev\|\.local/bin' "$shell_rc" 2>/dev/null; then
+    if ! grep -q 'claudebox\|\.local/bin' "$shell_rc" 2>/dev/null; then
         echo "" >> "$shell_rc"
-        echo "# claude-dev (aggiunto da claude-dev.sh)" >> "$shell_rc"
+        echo "# claudebox (aggiunto da claudebox.sh)" >> "$shell_rc"
         echo "$path_line" >> "$shell_rc"
         ok "PATH aggiornato in: $shell_rc"
     else
@@ -112,11 +112,11 @@ cmd_install() {
     ok "Installazione completata!"
     echo ""
     echo -e "  Riavvia il terminale (o esegui: source $shell_rc) per usare"
-    echo    "  il comando 'claude-dev' da qualsiasi cartella."
+    echo    "  il comando 'claudebox' da qualsiasi cartella."
     echo ""
     echo    "  Uso rapido:"
     echo -e "    cd ~/progetti/mio-progetto"
-    echo -e "    claude-dev start"
+    echo -e "    claudebox start"
     echo ""
 }
 
@@ -194,9 +194,9 @@ cmd_init() {
   "mounts": [
     "source=\${localEnv:CLAUDE_CONFIG_DIR},target=/host-claude,type=bind,readonly=true,consistency=cached",
     "source=\${localEnv:CCSTATUSLINE_CONFIG_DIR},target=/host-ccstatusline,type=bind,readonly=true,consistency=cached",
-    "source=claude-dev-shared-config,target=/home/node/.claude,type=volume",
-    "source=claude-dev-shared-ccstatusline,target=/home/node/.config/ccstatusline,type=volume",
-    "source=claude-dev-$proj-history,target=/commandhistory,type=volume"
+    "source=claudebox-shared-config,target=/home/node/.claude,type=volume",
+    "source=claudebox-shared-ccstatusline,target=/home/node/.config/ccstatusline,type=volume",
+    "source=claudebox-$proj-history,target=/commandhistory,type=volume"
   ],
   "remoteUser": "node",
   "containerEnv": {
@@ -233,14 +233,14 @@ EOF
     ok "Scaricato .devcontainer/Dockerfile (ufficiale Anthropic)"
     ok "Scaricato .devcontainer/init-firewall.sh (ufficiale Anthropic)"
     echo ""
-    info "Prossimo passo: claude-dev up"
+    info "Prossimo passo: claudebox up"
 }
 
 # ── UP ──────────────────────────────────────────────────────────────────────────
 cmd_up() {
     check_prerequisites
 
-    [ -f ".devcontainer/devcontainer.json" ] || err "Nessun .devcontainer trovato. Esegui prima: claude-dev init"
+    [ -f ".devcontainer/devcontainer.json" ] || err "Nessun .devcontainer trovato. Esegui prima: claudebox init"
 
     local proj cname
     proj="$(project_name)"
@@ -250,14 +250,14 @@ cmd_up() {
 
     # Build
     info "Build immagine Docker (qualche minuto alla prima esecuzione)..."
-    docker build -t "claude-dev-img-$proj" .devcontainer/
-    ok "Immagine pronta: claude-dev-img-$proj"
+    docker build -t "claudebox-img-$proj" .devcontainer/
+    ok "Immagine pronta: claudebox-img-$proj"
 
     # Probe: verifica che Docker possa accedere a CLAUDE_CONFIG_DIR
     info "Verifica che Docker possa accedere a CLAUDE_CONFIG_DIR..."
     if ! docker run --rm \
             -v "${CLAUDE_CONFIG_DIR}:/probe:ro" \
-            "claude-dev-img-$proj" \
+            "claudebox-img-$proj" \
             ls /probe &>/dev/null; then
         echo ""
         echo -e "  ${RED}ERR${NC} Docker non riesce ad accedere alla cartella:"
@@ -275,7 +275,7 @@ cmd_up() {
     if [ -d "${CCSTATUSLINE_CONFIG_DIR:-}" ]; then
         if ! docker run --rm \
                 -v "${CCSTATUSLINE_CONFIG_DIR}:/probe-cs:ro" \
-                "claude-dev-img-$proj" \
+                "claudebox-img-$proj" \
                 ls /probe-cs &>/dev/null; then
             warn "Docker non riesce ad accedere a CCSTATUSLINE_CONFIG_DIR ($CCSTATUSLINE_CONFIG_DIR)."
             warn "ccstatusline procedera senza config personalizzata."
@@ -299,13 +299,13 @@ cmd_up() {
         -v "$(pwd):/workspace:cached" \
         -v "${CLAUDE_CONFIG_DIR}:/host-claude:ro" \
         -v "${CCSTATUSLINE_CONFIG_DIR:-/dev/null}:/host-ccstatusline:ro" \
-        -v "claude-dev-shared-config:/home/node/.claude" \
-        -v "claude-dev-shared-ccstatusline:/home/node/.config/ccstatusline" \
-        -v "claude-dev-${proj}-history:/commandhistory" \
+        -v "claudebox-shared-config:/home/node/.claude" \
+        -v "claudebox-shared-ccstatusline:/home/node/.config/ccstatusline" \
+        -v "claudebox-${proj}-history:/commandhistory" \
         -e CLAUDE_CONFIG_DIR="/home/node/.claude" \
         -e CCSTATUSLINE_CONFIG_DIR="/home/node/.config/ccstatusline" \
         -w /workspace \
-        "claude-dev-img-$proj" \
+        "claudebox-img-$proj" \
         sleep infinity >/dev/null
     ok "Container avviato"
 
@@ -388,7 +388,7 @@ cmd_update() {
 
     header "=== Aggiornamento file ufficiali Anthropic ==="
 
-    [ -d "$dc_dir" ] || err "Nessun .devcontainer trovato. Esegui prima: claude-dev init"
+    [ -d "$dc_dir" ] || err "Nessun .devcontainer trovato. Esegui prima: claudebox init"
 
     info "Scarico versioni aggiornate da anthropics/claude-code (main)..."
     download_file "$ANTHROPIC_RAW_BASE/Dockerfile"       "$dc_dir/Dockerfile"       "Dockerfile"
@@ -397,7 +397,7 @@ cmd_update() {
 
     echo ""
     ok "File ufficiali aggiornati. devcontainer.json non modificato."
-    info "Esegui 'claude-dev up' per ricostruire l'immagine con le modifiche."
+    info "Esegui 'claudebox up' per ricostruire l'immagine con le modifiche."
 }
 
 # ── START ───────────────────────────────────────────────────────────────────────
@@ -409,7 +409,7 @@ cmd_start() {
     # Banner
     echo ""
     echo -e "  ${BLUE}+======================================================+${NC}"
-    echo -e "  ${BLUE}|         claude-dev  --  avvio automatico             |${NC}"
+    echo -e "  ${BLUE}|         claudebox  --  avvio automatico             |${NC}"
     echo -e "  ${BLUE}+======================================================+${NC}"
     echo ""
     echo -e "  Progetto : ${BOLD}$proj${NC}"
@@ -523,7 +523,7 @@ cmd_start() {
 cmd_shell() {
     local cname
     cname="$(container_name)"
-    container_running || err "Container '$cname' non in esecuzione. Usa: claude-dev up"
+    container_running || err "Container '$cname' non in esecuzione. Usa: claudebox up"
     info "Apertura shell in '$cname'..."
     docker exec -it -u node "$cname" zsh
 }
@@ -544,27 +544,27 @@ cmd_destroy() {
     cname="$(container_name)"
 
     warn "Questa operazione rimuove container, volume history e immagine per '$proj'."
-    echo  "  Il volume condiviso 'claude-dev-shared-config' NON viene rimosso (condiviso tra progetti)."
+    echo  "  Il volume condiviso 'claudebox-shared-config' NON viene rimosso (condiviso tra progetti)."
     read -rp "Continuare? [y/N] " answer
     [ "${answer,,}" = "y" ] || { info "Annullato."; return; }
 
     container_exists && { docker rm -f "$cname" >/dev/null; ok "Container rimosso"; }
-    docker volume rm "claude-dev-${proj}-history" 2>/dev/null && ok "Volume history rimosso" || true
-    docker rmi "claude-dev-img-$proj" 2>/dev/null && ok "Immagine rimossa" || true
+    docker volume rm "claudebox-${proj}-history" 2>/dev/null && ok "Volume history rimosso" || true
+    docker rmi "claudebox-img-$proj" 2>/dev/null && ok "Immagine rimossa" || true
 
     echo ""
     echo "  Per rimuovere anche i volumi config condivisi:"
-    echo "    docker volume rm claude-dev-shared-config claude-dev-shared-ccstatusline"
+    echo "    docker volume rm claudebox-shared-config claudebox-shared-ccstatusline"
 }
 
 # ── HELP ────────────────────────────────────────────────────────────────────────
 cmd_help() {
     cat <<HELP
 
-  claude-dev -- devcontainer Claude Code per la cartella corrente
+  claudebox -- devcontainer Claude Code per la cartella corrente
 
   USO
-    claude-dev <comando>
+    claudebox <comando>
 
   COMANDI
     install   Auto-installa lo script nel PATH (~/.local/bin)
@@ -582,15 +582,15 @@ cmd_help() {
 
   PRIMA ESECUZIONE
     # Scarica e installa (una tantum):
-    bash claude-dev.sh
+    bash claudebox.sh
 
     # Poi da qualsiasi cartella progetto -- tutto in un comando:
     cd ~/progetti/mio-progetto
-    claude-dev start
+    claudebox start
 
     # Oppure passo-passo:
-    claude-dev init
-    claude-dev up
+    claudebox init
+    claudebox up
 
 HELP
 }

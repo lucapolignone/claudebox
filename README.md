@@ -1,60 +1,60 @@
-# claude-dev
+# claudebox
 
-Strumento da terminale per configurare e avviare un **devcontainer isolato per Claude Code** nella cartella del progetto corrente.
+Zero-dependency CLI to spin up an isolated Claude Code devcontainer in any project folder. Windows, macOS and Linux.
 
-Scarica i file ufficiali di Anthropic (`Dockerfile` e `init-firewall.sh`) direttamente dal repository [`anthropics/claude-code`](https://github.com/anthropics/claude-code), genera un `devcontainer.json` personalizzato con il nome del progetto, monta le credenziali esistenti di Claude Code dall'host (in sola lettura), e avvia il container con `claude --dangerously-skip-permissions` dopo aver verificato che l'isolamento sia corretto.
-
----
-
-## Prerequisiti
-
-- **Docker Desktop** (Windows, macOS) o **Docker Engine** (Linux) installato e in esecuzione
-- **Claude Code** installato e configurato sull'host (credenziali valide in `~/.claude`)
-- **PowerShell 5.1+** (Windows) oppure **bash/zsh** (macOS, Linux)
+claudebox downloads the official Anthropic `Dockerfile` and `init-firewall.sh` directly from [`anthropics/claude-code`](https://github.com/anthropics/claude-code), generates a project-specific `devcontainer.json`, mounts your existing Claude Code credentials from the host (read-only), and launches the container with `claude --dangerously-skip-permissions` after verifying isolation is correct.
 
 ---
 
-## Installazione
+## Requirements
+
+- **Docker Desktop** (Windows, macOS) or **Docker Engine** (Linux), running
+- **Claude Code** installed and authenticated on the host (credentials in `~/.claude`)
+- **PowerShell 5.1+** (Windows) or **bash/zsh** (macOS, Linux)
+
+---
+
+## Installation
 
 ### Windows (PowerShell)
 
-Scarica `claude-dev.ps1`, poi esegui:
+Download `claudebox.ps1`, then run:
 
 ```powershell
-# Abilita l'esecuzione di script (una tantum)
+# Allow script execution (one-time)
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-# Rimuovi il blocco "scaricato da internet"
-Unblock-File .\claude-dev.ps1
+# Unblock the downloaded file
+Unblock-File .\claudebox.ps1
 
-# Auto-installazione: copia lo script in ~/.local/bin e aggiunge l'alias al profilo
-.\claude-dev.ps1
+# Self-install: copies the script to ~/.local/bin and adds the alias to your profile
+.\claudebox.ps1
 ```
 
-Riavvia PowerShell (o esegui `. $PROFILE`), poi il comando `claude-dev` è disponibile ovunque.
+Restart PowerShell (or run `. $PROFILE`) — the `claudebox` command is now available everywhere.
 
 ### macOS / Linux
 
-Scarica `claude-dev.sh`, poi esegui:
+Download `claudebox.sh`, then run:
 
 ```bash
-bash claude-dev.sh
+bash claudebox.sh
 ```
 
-Lo script si copia in `~/.local/bin/claude-dev` e aggiunge il PATH al tuo `.zshrc` o `.bashrc`.
+The script copies itself to `~/.local/bin/claudebox` and adds it to your PATH via `.zshrc` or `.bashrc`.
 
-Riavvia il terminale (o esegui `source ~/.zshrc`), poi il comando `claude-dev` è disponibile ovunque.
+Restart the terminal (or run `source ~/.zshrc`) — the `claudebox` command is now available everywhere.
 
 ---
 
-## Variabili d'ambiente
+## Environment variables
 
-| Variabile | Default | Descrizione |
+| Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Cartella config e credenziali di Claude Code sull'host |
-| `CCSTATUSLINE_CONFIG_DIR` | `~/.config/ccstatusline` | Cartella config di [ccstatusline](https://github.com/sirmalloc/ccstatusline) (opzionale) |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config and credentials directory on the host |
+| `CCSTATUSLINE_CONFIG_DIR` | `~/.config/ccstatusline` | [ccstatusline](https://github.com/sirmalloc/ccstatusline) config directory (optional) |
 
-Se non impostate, vengono rilevate automaticamente. Per impostarle permanentemente:
+Both are auto-detected if not set. To set them permanently:
 
 **Windows:**
 ```powershell
@@ -66,137 +66,138 @@ Se non impostate, vengono rilevate automaticamente. Per impostarle permanentemen
 echo 'export CLAUDE_CONFIG_DIR="$HOME/.claude"' >> ~/.zshrc
 ```
 
-### Docker Desktop — File Sharing (Windows e macOS)
+### Docker Desktop — File Sharing (Windows and macOS)
 
-Docker deve poter accedere alla cartella di configurazione di Claude Code. Se `claude-dev up` segnala un errore di accesso:
+Docker needs access to your Claude Code config directory. If `claudebox up` reports an access error:
 
-1. Apri **Docker Desktop → Settings → Resources → File Sharing**
-2. Aggiungi il percorso di `CLAUDE_CONFIG_DIR` (es. `C:\Users\tuonome\.claude`)
-3. Se usi ccstatusline, aggiungi anche `CCSTATUSLINE_CONFIG_DIR`
-4. Clicca **Apply & Restart**
+1. Open **Docker Desktop → Settings → Resources → File Sharing**
+2. Add the path of `CLAUDE_CONFIG_DIR` (e.g. `C:\Users\you\.claude`)
+3. If you use ccstatusline, also add `CCSTATUSLINE_CONFIG_DIR`
+4. Click **Apply & Restart**
 
-Su Linux questo passaggio non è necessario.
+On Linux this step is not required.
 
 ---
 
-## Utilizzo
+## Usage
 
-### Avvio rapido (tutto in un comando)
+### Quickstart
 
 ```bash
-cd /percorso/del/tuo/progetto
-claude-dev start
+cd /path/to/your/project
+claudebox start
 ```
 
-`start` mostra un riepilogo interattivo, chiede se aggiornare i file ufficiali Anthropic (se `.devcontainer/` esiste già), e poi esegue in sequenza `init` → `build` → `run` → verifica isolamento → `claude --dangerously-skip-permissions`.
+`start` shows an interactive summary, optionally updates the official Anthropic files if `.devcontainer/` already exists, then runs `init` → `build` → `run` → isolation check → `claude --dangerously-skip-permissions` in sequence.
 
-### Comandi disponibili
+### Commands
 
-| Comando | Descrizione |
+| Command | Description |
 |---|---|
-| `claude-dev start` | Esegue tutto in automatico: init (se serve) + build + run + claude |
-| `claude-dev init` | Scarica `Dockerfile` e `init-firewall.sh` da Anthropic, genera `devcontainer.json` |
-| `claude-dev up` | Build immagine, avvio container, verifica isolamento, lancia claude |
-| `claude-dev update` | Ri-scarica `Dockerfile` e `init-firewall.sh` da Anthropic (senza toccare `devcontainer.json`) |
-| `claude-dev shell` | Apre una shell zsh nel container già avviato |
-| `claude-dev stop` | Ferma il container (senza rimuoverlo) |
-| `claude-dev destroy` | Rimuove container, volume history e immagine del progetto corrente |
+| `claudebox start` | Full auto-setup: init (if needed) + build + run + claude |
+| `claudebox init` | Download `Dockerfile` and `init-firewall.sh` from Anthropic, generate `devcontainer.json` |
+| `claudebox up` | Build image, start container, verify isolation, launch claude |
+| `claudebox update` | Re-download `Dockerfile` and `init-firewall.sh` from Anthropic (keeps `devcontainer.json` untouched) |
+| `claudebox shell` | Open a zsh shell in the running container |
+| `claudebox stop` | Stop the container (without removing it) |
+| `claudebox destroy` | Remove the container, history volume and image for the current project |
 
-### Flusso tipico
-
-```bash
-# Prima volta su un progetto
-cd ~/progetti/mio-progetto
-claude-dev start          # genera tutto e apre claude
-
-# Volte successive
-claude-dev start          # chiede se fare update, poi parte
-# oppure, se vuoi solo riaprire senza rebuild:
-claude-dev shell
-
-# Aggiornare i file Anthropic senza ricreare tutto
-claude-dev update
-claude-dev up
-
-# Pulizia completa del progetto
-claude-dev destroy
-```
-
----
-
-## Architettura dei mount
-
-```
-Host                                    Container
-─────────────────────────────────────────────────────────────────────
-CLAUDE_CONFIG_DIR           →  /host-claude              (read-only)
-CCSTATUSLINE_CONFIG_DIR     →  /host-ccstatusline        (read-only)
-
-                               al primo avvio: cp -rn
-                                      ↓
-volume claude-dev-shared-config        →  /home/node/.claude
-volume claude-dev-shared-ccstatusline  →  /home/node/.config/ccstatusline
-volume claude-dev-<progetto>-history   →  /commandhistory
-cartella progetto corrente             →  /workspace        (read-write)
-```
-
-**Perché questo schema:**
-
-- `CLAUDE_CONFIG_DIR` è montata **read-only** in `/host-claude` — l'host non viene mai modificato dal container
-- Claude Code lavora su un **volume Docker** (`claude-dev-shared-config`) con filesystem Linux nativo: niente problemi di operazioni atomiche su filesystem NTFS/Windows
-- Le credenziali vengono copiate dall'host al volume **solo al primo avvio** (quando `.credentials.json` non esiste ancora nel volume)
-- Il volume `claude-dev-shared-config` è **condiviso tra tutti i devcontainer** — stesse credenziali e configurazioni per tutti i progetti
-- Il volume history è **per-progetto** — la history della shell non si mescola tra progetti diversi
-- Le modifiche al codice in `/workspace` sono immediatamente visibili nell'IDE sull'host
-
----
-
-## File generati in `.devcontainer/`
-
-| File | Origine | Note |
-|---|---|---|
-| `Dockerfile` | Scaricato da `anthropics/claude-code` | Immagine ufficiale Anthropic |
-| `init-firewall.sh` | Scaricato da `anthropics/claude-code` | Firewall ufficiale Anthropic |
-| `devcontainer.json` | Generato da claude-dev | Personalizzato con nome progetto e mount config |
-
-`claude-dev update` aggiorna solo `Dockerfile` e `init-firewall.sh` senza toccare `devcontainer.json`.
-
-Puoi committare `.devcontainer/` nel repository per condividere la configurazione con il team — ogni sviluppatore dovrà solo avere `CLAUDE_CONFIG_DIR` impostata con le proprie credenziali.
-
----
-
-## Volumi Docker condivisi
-
-| Volume | Mount nel container | Contenuto |
-|---|---|---|
-| `claude-dev-shared-config` | `/home/node/.claude` | Credenziali e configurazioni Claude Code |
-| `claude-dev-shared-ccstatusline` | `/home/node/.config/ccstatusline` | Configurazione ccstatusline |
-| `claude-dev-<progetto>-history` | `/commandhistory` | History shell specifica del progetto |
-
-Per azzerare le configurazioni condivise (es. dopo aver aggiornato le credenziali sull'host):
+### Typical workflow
 
 ```bash
-docker volume rm claude-dev-shared-config claude-dev-shared-ccstatusline
+# First time on a project
+cd ~/projects/my-project
+claudebox start          # generates everything and opens claude
+
+# Subsequent runs
+claudebox start          # asks whether to update, then starts
+# or, to re-attach without rebuilding:
+claudebox shell
+
+# Update Anthropic files without recreating everything
+claudebox update
+claudebox up
+
+# Full cleanup for this project
+claudebox destroy
 ```
 
-Al prossimo `claude-dev up` i volumi vengono ricreati e le config ricopiate dall'host.
+---
+
+## Mount architecture
+
+```
+Host                                     Container
+──────────────────────────────────────────────────────────────────────
+CLAUDE_CONFIG_DIR            ->  /host-claude              (read-only)
+CCSTATUSLINE_CONFIG_DIR      ->  /host-ccstatusline        (read-only)
+
+                                on first start: cp -rn
+                                       |
+                                       v
+volume claudebox-shared-config        ->  /home/node/.claude
+volume claudebox-shared-ccstatusline  ->  /home/node/.config/ccstatusline
+volume claudebox-<project>-history    ->  /commandhistory
+current project directory             ->  /workspace         (read-write)
+```
+
+**Why this design:**
+
+- `CLAUDE_CONFIG_DIR` is mounted **read-only** at `/host-claude` — the host is never modified by the container
+- Claude Code works on a **Docker volume** (`claudebox-shared-config`) backed by a native Linux filesystem — no issues with atomic rename operations on NTFS/Windows
+- Credentials are copied from the host to the volume **only on first start** (when `.credentials.json` is not yet in the volume)
+- `claudebox-shared-config` is **shared across all devcontainers** — same credentials and settings for every project
+- The history volume is **per-project** — shell history does not bleed between projects
+- Code changes in `/workspace` are immediately visible in your IDE on the host
 
 ---
 
-## Sicurezza
+## Generated `.devcontainer/` files
 
-- Claude Code gira con `--dangerously-skip-permissions` perché il container stesso è il sandbox
-- Il filesystem dell'host è inaccessibile tranne `/workspace` (il progetto corrente) e le cartelle config montate read-only
-- Il firewall `init-firewall.sh` (ufficiale Anthropic) limita il traffico di rete in uscita a: Anthropic API, npm registry, GitHub, statsig, sentry
-- Su Windows/macOS il firewall potrebbe non attivarsi (`NET_ADMIN` non disponibile) — l'isolamento del filesystem rimane comunque attivo
-- Le credenziali Claude non vengono mai scritte nell'immagine Docker
-
----
-
-## Compatibilità
-
-| Piattaforma | Script | Note |
+| File | Source | Notes |
 |---|---|---|
-| Windows 10/11 | `claude-dev.ps1` | Richiede Docker Desktop e PowerShell 5.1+ |
-| macOS | `claude-dev.sh` | Richiede Docker Desktop |
-| Linux | `claude-dev.sh` | Richiede Docker Engine; nessuna configurazione File Sharing necessaria |
+| `Dockerfile` | Downloaded from `anthropics/claude-code` | Official Anthropic image |
+| `init-firewall.sh` | Downloaded from `anthropics/claude-code` | Official Anthropic firewall script |
+| `devcontainer.json` | Generated by claudebox | Project name + config mount customizations |
+
+`claudebox update` refreshes only `Dockerfile` and `init-firewall.sh`, leaving `devcontainer.json` untouched.
+
+You can commit `.devcontainer/` to your repository to share the setup with your team — each developer only needs their own `CLAUDE_CONFIG_DIR` with valid credentials.
+
+---
+
+## Shared Docker volumes
+
+| Volume | Mount in container | Contents |
+|---|---|---|
+| `claudebox-shared-config` | `/home/node/.claude` | Claude Code credentials and settings |
+| `claudebox-shared-ccstatusline` | `/home/node/.config/ccstatusline` | ccstatusline configuration |
+| `claudebox-<project>-history` | `/commandhistory` | Per-project shell history |
+
+To reset shared config (e.g. after updating credentials on the host):
+
+```bash
+docker volume rm claudebox-shared-config claudebox-shared-ccstatusline
+```
+
+The next `claudebox up` will recreate the volumes and copy the config from the host.
+
+---
+
+## Security
+
+- Claude Code runs with `--dangerously-skip-permissions` because the container itself is the sandbox
+- The host filesystem is inaccessible except for `/workspace` (the current project) and the read-only config mounts
+- The `init-firewall.sh` script (official Anthropic) restricts outbound network traffic to: Anthropic API, npm registry, GitHub, statsig, sentry
+- On Windows/macOS the firewall may not activate (`NET_ADMIN` unavailable) — filesystem isolation still applies
+- Claude credentials are never written into the Docker image
+
+---
+
+## Compatibility
+
+| Platform | Script | Notes |
+|---|---|---|
+| Windows 10/11 | `claudebox.ps1` | Requires Docker Desktop and PowerShell 5.1+ |
+| macOS | `claudebox.sh` | Requires Docker Desktop |
+| Linux | `claudebox.sh` | Requires Docker Engine; no File Sharing configuration needed |
