@@ -1,21 +1,24 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    claudebox -- devcontainer Claude Code per la cartella corrente (auto-installante)
+    claudebox -- isolated Claude Code devcontainer for the current project folder (self-installing)
 
 .DESCRIPTION
-    Al primo avvio senza argomenti, o con il flag -Install, lo script si copia
-    in un percorso nel PATH dell'utente e aggiunge un alias "claudebox" al profilo
-    PowerShell, cosi da essere richiamabile da qualsiasi cartella.
+    On first run without arguments the script copies itself into a PATH directory
+    and adds a "claudebox" function to the PowerShell profile,
+    making it available from any folder.
 
 .PARAMETER Command
-    Comando da eseguire: install | init | up | start | shell | stop | destroy | help
+    Command to run: install | init | up | start | update | shell | stop | destroy | help
+
+.PARAMETER AutoYes
+    Skip all confirmation prompts (equivalent to answering Y/yes to everything)
 
 .EXAMPLE
-    # Prima esecuzione -- auto-installazione:
+    # First run -- self-install:
     .\claudebox.ps1
 
-    # Dopo l'installazione, da qualsiasi cartella:
+    # After installation, from any folder:
     claudebox init
     claudebox up
     claudebox shell
@@ -26,11 +29,28 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('install','init','up','start','update','shell','stop','destroy','help','')]
-    [string]$Command = ''
+    [string]$Command = '',
+
+    [Parameter()]
+    [Alias('y')]
+    [switch]$AutoYes
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Confirm-Step ($prompt) {
+    if ($AutoYes) { return $true }
+    $r = Read-Host $prompt
+    return ($r.ToLower() -ne 'n')
+}
+
+function Read-InputOrDefault ($prompt, $default) {
+    if ($AutoYes) { Write-Host "$prompt [auto: $default]"; return $default }
+    $r = Read-Host $prompt
+    if ([string]::IsNullOrWhiteSpace($r)) { return $default }
+    return $r
+}
 
 # --- Colori / output helpers ---------------------------------------------------
 function Write-Info    ($msg) { Write-Host "  $([char]0x25B8) $msg" -ForegroundColor Cyan    }
@@ -64,7 +84,7 @@ function Test-ContainerRunning {
 
 # --- Percorso di installazione -------------------------------------------------
 function Get-InstallDir {
-    # Primo percorso utente gia nel PATH, altrimenti ne creiamo uno dedicato
+    # Use first existing user directory in PATH, otherwise create one
     $candidates = @(
         "$env:USERPROFILE\bin",
         "$env:USERPROFILE\.local\bin",
@@ -73,36 +93,36 @@ function Get-InstallDir {
     foreach ($dir in $candidates) {
         if (Test-Path $dir) { return $dir }
     }
-    # Nessuno trovato: creiamo il primo
+    # None found: create the first candidate
     New-Item -ItemType Directory -Path $candidates[0] -Force | Out-Null
     return $candidates[0]
 }
 
 # --- AUTO-INSTALLAZIONE --------------------------------------------------------
 function Invoke-Install {
-    Write-Header "=== Installazione claudebox ==="
+    Write-Header "=== Installing claudebox ==="
 
     $installDir  = Get-InstallDir
     $destScript  = Join-Path $installDir 'claudebox.ps1'
     $sourceScript = $MyInvocation.PSCommandPath
 
-    # 1. Copia lo script
-    Write-Info "Copia script in: $destScript"
+    # 1. Copy script
+    Write-Info "Copying script to: $destScript"
     Copy-Item -Path $sourceScript -Destination $destScript -Force
-    Write-Ok "Script copiato"
+    Write-Ok "Script copied"
 
-    # 2. Aggiunge la directory al PATH utente (se non c'e gia)
+    # 2. Add directory to user PATH (if not already there)
     $currentPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
     if ($currentPath -notlike "*$installDir*") {
         [Environment]::SetEnvironmentVariable(
             'PATH', "$currentPath;$installDir", 'User')
         $env:PATH = "$env:PATH;$installDir"
-        Write-Ok "Aggiunto al PATH utente: $installDir"
+        Write-Ok "Added to user PATH: $installDir"
     } else {
-        Write-Info "$installDir gia nel PATH"
+        Write-Info "$installDir already in PATH"
     }
 
-    # 3. Aggiunge alias "claudebox" al profilo PowerShell
+    # 3. Add alias to PowerShell profile
     $profilePath = $PROFILE.CurrentUserAllHosts
     $profileDir  = Split-Path $profilePath
     if (-not (Test-Path $profileDir)) {
@@ -115,23 +135,23 @@ function Invoke-Install {
     $aliasLine = "function claudebox { & '$destScript' @args }"
     $profileContent = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
     if ($profileContent -notlike "*claudebox*") {
-        Add-Content -Path $profilePath -Value "`n# claudebox alias (aggiunto da claudebox.ps1)`n$aliasLine"
-        Write-Ok "Alias 'claudebox' aggiunto al profilo: $profilePath"
+        Add-Content -Path $profilePath -Value "`n# claudebox alias (added by claudebox.ps1)`n$aliasLine"
+        Write-Ok "Alias 'claudebox' added to profile: $profilePath"
     } else {
-        Write-Info "Alias 'claudebox' gia presente nel profilo"
+        Write-Info "Alias 'claudebox' already present in profile"
     }
 
-    # 4. Carica subito l'alias nella sessione corrente
+    # 4. Load alias in current session
     Invoke-Expression $aliasLine
 
     Write-Host ""
-    Write-Ok "Installazione completata!"
+    Write-Ok "Installation complete!"
     Write-Host ""
-    Write-Host "  Riavvia PowerShell (o esegui: . `$PROFILE) per usare" -ForegroundColor White
-    Write-Host "  il comando 'claudebox' da qualsiasi cartella." -ForegroundColor White
+    Write-Host "  Restart PowerShell (or run: . `$PROFILE) to use" -ForegroundColor White
+    Write-Host "  the 'claudebox' command from any folder." -ForegroundColor White
     Write-Host ""
-    Write-Host "  Uso rapido:" -ForegroundColor White
-    Write-Host "    cd C:\tuoi\progetti\mio-progetto" -ForegroundColor DarkGray
+    Write-Host "  Quick start:" -ForegroundColor White
+    Write-Host "    cd C:\your\projects\my-project" -ForegroundColor DarkGray
     Write-Host "    claudebox init" -ForegroundColor DarkGray
     Write-Host "    claudebox up" -ForegroundColor DarkGray
     Write-Host ""
@@ -139,20 +159,20 @@ function Invoke-Install {
 
 # --- PREREQUISITI --------------------------------------------------------------
 function Test-Prerequisites {
-    Write-Header "=== Controllo prerequisiti ==="
+    Write-Header "=== Checking prerequisites ==="
 
     # Docker CLI
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        Write-Err "Docker non trovato. Installalo da https://www.docker.com/products/docker-desktop"
+        Write-Err "Docker not found. Install it from https://www.docker.com/products/docker-desktop"
     }
-    Write-Ok "Docker trovato: $(docker --version)"
+    Write-Ok "Docker found: $(docker --version)"
 
-    # Daemon Docker
+    # Docker daemon
     try {
         docker info 2>&1 | Out-Null
-        Write-Ok "Docker daemon attivo"
+        Write-Ok "Docker daemon is running"
     } catch {
-        Write-Err "Il daemon Docker non risponde. Avvia Docker Desktop e riprova."
+        Write-Err "Docker daemon is not responding. Start Docker Desktop and try again."
     }
 
     # CLAUDE_CONFIG_DIR
@@ -165,23 +185,23 @@ function Test-Prerequisites {
         foreach ($c in $candidates) {
             if (Test-Path $c) {
                 $env:CLAUDE_CONFIG_DIR = $c
-                Write-Warn "CLAUDE_CONFIG_DIR non impostata; uso: $c"
+                Write-Warn "CLAUDE_CONFIG_DIR not set; using: $c"
                 break
             }
         }
         if (-not $env:CLAUDE_CONFIG_DIR) {
             Write-Err (@"
-CLAUDE_CONFIG_DIR non impostata e nessuna cartella Claude trovata.
-Imposta la variabile prima di usare questo comando:
+CLAUDE_CONFIG_DIR is not set and no Claude folder was found.
+Set the variable before using this command:
   `$env:CLAUDE_CONFIG_DIR = "`$env:USERPROFILE\.claude"
-O in modo permanente:
+Or permanently:
   [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', "`$env:USERPROFILE\.claude", 'User')
 "@)
         }
     }
 
     if (-not (Test-Path $env:CLAUDE_CONFIG_DIR)) {
-        Write-Err "CLAUDE_CONFIG_DIR='$env:CLAUDE_CONFIG_DIR' non esiste."
+        Write-Err "CLAUDE_CONFIG_DIR='$env:CLAUDE_CONFIG_DIR' does not exist."
     }
     Write-Ok "CLAUDE_CONFIG_DIR -> $env:CLAUDE_CONFIG_DIR"
 
@@ -190,9 +210,9 @@ O in modo permanente:
         $ccDefault = "$env:USERPROFILE\.config\ccstatusline"
         if (Test-Path $ccDefault) {
             $env:CCSTATUSLINE_CONFIG_DIR = $ccDefault
-            Write-Warn "CCSTATUSLINE_CONFIG_DIR non impostata; uso: $ccDefault"
+            Write-Warn "CCSTATUSLINE_CONFIG_DIR not set; using: $ccDefault"
         } else {
-            Write-Warn "CCSTATUSLINE_CONFIG_DIR non impostata e $ccDefault non trovata. ccstatusline non sara configurato."
+            Write-Warn "CCSTATUSLINE_CONFIG_DIR not set and $ccDefault not found. ccstatusline will not be configured."
             $env:CCSTATUSLINE_CONFIG_DIR = $ccDefault
         }
     }
@@ -200,7 +220,7 @@ O in modo permanente:
 }
 
 # --- INIT ----------------------------------------------------------------------
-# URL base dei file ufficiali Anthropic su GitHub (raw)
+# Base URL for official Anthropic files on GitHub (raw)
 $ANTHROPIC_RAW_BASE = 'https://raw.githubusercontent.com/anthropics/claude-code/main/.devcontainer'
 
 function Invoke-Download {
@@ -211,16 +231,16 @@ function Invoke-Download {
     )
     Write-Info "Download $Label..."
     try {
-        # Scarica come byte per preservare i line ending originali (LF su Linux)
+        # Download as bytes to preserve original line endings (LF on Linux)
         $bytes = (Invoke-WebRequest -Uri $Url -UseBasicParsing -ErrorAction Stop).Content
-        # Content puo essere string o byte[] a seconda della versione di PS
+        # Content may be string or byte[] depending on PS version
         if ($bytes -is [string]) {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($bytes)
         }
         [System.IO.File]::WriteAllBytes($Dest, $bytes)
-        Write-Ok "$Label scaricato da GitHub ufficiale"
+        Write-Ok "$Label downloaded from official GitHub"
     } catch {
-        Write-Err "Impossibile scaricare $Label da:`n  $Url`nErrore: $_`nVerifica la connessione a internet e riprova."
+        Write-Err "Failed to download $Label from:`n  $Url`nError: $_`nCheck your internet connection and try again."
     }
 }
 
@@ -228,17 +248,16 @@ function Invoke-Init {
     $proj  = Get-ProjectName
     $dcDir = Join-Path (Get-Location) ".devcontainer"
 
-    Write-Header "=== Inizializzazione devcontainer per '$proj' ==="
+    Write-Header "=== Initializing devcontainer for '$proj' ==="
 
     if (Test-Path $dcDir) {
-        Write-Warn "La cartella $dcDir esiste gia."
-        $answer = Read-Host "Sovrascrivere i file? [y/N]"
-        if ($answer.ToLower() -ne 'y') { Write-Info "Annullato."; return }
+        Write-Warn "Folder $dcDir already exists."
+        if (-not (Confirm-Step "Overwrite existing files? [y/N]")) { Write-Info "Cancelled."; return }
     }
     New-Item -ItemType Directory -Path $dcDir -Force | Out-Null
 
-    # -- Dockerfile e init-firewall.sh: scaricati direttamente da Anthropic ----
-    Write-Info "Scarico i file ufficiali da anthropics/claude-code..."
+    # -- Dockerfile and init-firewall.sh: downloaded directly from Anthropic ----
+    Write-Info "Downloading official files from anthropics/claude-code..."
     Invoke-Download `
         -Url  "$ANTHROPIC_RAW_BASE/Dockerfile" `
         -Dest "$dcDir\Dockerfile" `
@@ -249,15 +268,15 @@ function Invoke-Init {
         -Dest "$dcDir\init-firewall.sh" `
         -Label "init-firewall.sh"
 
-    # -- devcontainer.json: generato da noi con le personalizzazioni -----------
-    # Differenze rispetto all'originale Anthropic:
-    #   - "name" impostato al nome del progetto corrente
-    #   - CLAUDE_CONFIG_DIR dell'host -> /host-claude (read-only, mai modificata)
-    #   - volume Docker condiviso "claudebox-shared-config" -> /home/node/.claude
-    #     (filesystem Linux nativo: niente problemi di rename/atomic ops su NTFS)
-    #     Al primo avvio copia automaticamente le credenziali da /host-claude
-    #   - volume history per progetto per evitare conflitti tra progetti
-    Write-Info "Genero devcontainer.json personalizzato..."
+    # -- devcontainer.json: generated with our customizations ------------------
+    # Differences from the original Anthropic devcontainer:
+    #   - "name" set to the current project folder name
+    #   - Host CLAUDE_CONFIG_DIR -> /host-claude (read-only, never modified)
+    #   - Shared Docker volume "claudebox-shared-config" -> /home/node/.claude
+    #     (native Linux filesystem: no rename/atomic op issues on NTFS)
+    #     On first start, credentials are copied automatically from /host-claude
+    #   - Per-project history volume to avoid conflicts between projects
+    Write-Info "Generating custom devcontainer.json..."
     $devcontainerJson = @"
 {
   "name": "$proj",
@@ -303,20 +322,20 @@ function Invoke-Init {
   }
 }
 "@
-    # Scrivi con LF (compatibilita cross-platform)
+    # Write with LF line endings (cross-platform)
     $jsonLf    = $devcontainerJson -replace "`r`n", "`n"
     $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($jsonLf)
     $jsonPath  = Join-Path $dcDir "devcontainer.json"
     [System.IO.File]::WriteAllBytes($jsonPath, $jsonBytes)
 
-    Write-Ok "Generato $dcDir\devcontainer.json (personalizzato)"
+    Write-Ok "Generated $dcDir\devcontainer.json (customized)"
     Write-Host ""
-    Write-Host "  File nella cartella .devcontainer:" -ForegroundColor DarkGray
-    Write-Host "    Dockerfile        <- ufficiale anthropics/claude-code" -ForegroundColor DarkGray
-    Write-Host "    init-firewall.sh  <- ufficiale anthropics/claude-code" -ForegroundColor DarkGray
-    Write-Host "    devcontainer.json <- personalizzato (nome progetto + mount config)" -ForegroundColor DarkGray
+    Write-Host "  Files in .devcontainer folder:" -ForegroundColor DarkGray
+    Write-Host "    Dockerfile        <- official anthropics/claude-code" -ForegroundColor DarkGray
+    Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
+    Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Info "Prossimo passo: claudebox up"
+    Write-Info "Next step: claudebox up"
 }
 
 # --- UP ------------------------------------------------------------------------
@@ -324,15 +343,15 @@ function Invoke-Up {
     Test-Prerequisites
 
     if (-not (Test-Path ".devcontainer\devcontainer.json")) {
-        Write-Err "Nessun .devcontainer trovato. Esegui prima: claudebox init"
+        Write-Err "No .devcontainer found. Run first: claudebox init"
     }
 
     $proj  = Get-ProjectName
     $cname = Get-ContainerName
     $pwd   = (Get-Location).Path
 
-    # Normalizza il percorso per Docker (converte backslash -> slash e C: -> /c)
-    # Converte C:\foo\bar -> /c/foo/bar (scriptblock -replace non funziona in PS 5.x)
+    # Normalize path for Docker (convert backslash -> slash and C: -> /c)
+    # Convert C:\foo\bar -> /c/foo/bar (scriptblock in -replace does not work in PS 5.x)
     function Convert-ToDockerPath([string]$winPath) {
         $p = $winPath -replace '\\', '/'
         if ($p -match '^([A-Za-z]):(.*)') {
@@ -344,60 +363,60 @@ function Invoke-Up {
     $dockerConfigDir        = Convert-ToDockerPath $env:CLAUDE_CONFIG_DIR
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
 
-    Write-Header "=== Avvio devcontainer '$proj' ==="
+    Write-Header "=== Starting devcontainer '$proj' ==="
 
     # -- Build ------------------------------------------------------------------
-    Write-Info "Build immagine Docker (qualche minuto alla prima esecuzione)..."
+    Write-Info "Building Docker image (may take a few minutes on first run)..."
     docker build -t "claudebox-img-$proj" .devcontainer
-    Write-Ok "Immagine pronta: claudebox-img-$proj"
+    Write-Ok "Image ready: claudebox-img-$proj"
 
     # -- Verifica accesso Docker alla CLAUDE_CONFIG_DIR -------------------------
-    Write-Info "Verifica che Docker possa accedere a CLAUDE_CONFIG_DIR..."
+    Write-Info "Verifying Docker can access CLAUDE_CONFIG_DIR..."
     $probeOutput = & docker run --rm `
         -v "${dockerConfigDir}:/probe:ro" `
         "claudebox-img-$proj" `
         ls /probe 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
-        Write-Host "  ERR Docker non riesce ad accedere alla cartella:" -ForegroundColor Red
+        Write-Host "  ERR Docker cannot access the folder:" -ForegroundColor Red
         Write-Host "      $env:CLAUDE_CONFIG_DIR" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "  Devi aggiungerla al File Sharing di Docker Desktop:" -ForegroundColor White
+        Write-Host "  You need to add it to Docker Desktop File Sharing:" -ForegroundColor White
         Write-Host ""
-        Write-Host "    1. Apri Docker Desktop" -ForegroundColor DarkGray
-        Write-Host "    2. Vai in Settings -> Resources -> File Sharing" -ForegroundColor DarkGray
-        Write-Host "    3. Aggiungi questo percorso:" -ForegroundColor DarkGray
+        Write-Host "    1. Open Docker Desktop" -ForegroundColor DarkGray
+        Write-Host "    2. Go to Settings -> Resources -> File Sharing" -ForegroundColor DarkGray
+        Write-Host "    3. Add this path:" -ForegroundColor DarkGray
         Write-Host "       $env:CLAUDE_CONFIG_DIR" -ForegroundColor Cyan
-        Write-Host "    4. Clicca Apply & Restart" -ForegroundColor DarkGray
-        Write-Host "    5. Riesegui: claudebox up" -ForegroundColor DarkGray
+        Write-Host "    4. Click Apply & Restart" -ForegroundColor DarkGray
+        Write-Host "    5. Run again: claudebox up" -ForegroundColor DarkGray
         Write-Host ""
         exit 1
     }
-    Write-Ok "Docker ha accesso a CLAUDE_CONFIG_DIR"
+    Write-Ok "Docker can access CLAUDE_CONFIG_DIR"
 
-    # Probe anche per ccstatusline (opzionale - non blocca se manca)
+    # Probe ccstatusline dir (optional - does not block if missing)
     if ($env:CCSTATUSLINE_CONFIG_DIR -and (Test-Path $env:CCSTATUSLINE_CONFIG_DIR)) {
         $probeCs = & docker run --rm `
             -v "${dockerCcstatuslineDir}:/probe-cs:ro" `
             "claudebox-img-$proj" `
             ls /probe-cs 2>&1
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Docker non riesce ad accedere a CCSTATUSLINE_CONFIG_DIR ($env:CCSTATUSLINE_CONFIG_DIR)."
-            Write-Host "  Aggiungila in Docker Desktop -> Settings -> Resources -> File Sharing" -ForegroundColor DarkGray
-            Write-Host "  ccstatusline procedera senza config personalizzata." -ForegroundColor DarkGray
+            Write-Warn "Docker cannot access CCSTATUSLINE_CONFIG_DIR ($env:CCSTATUSLINE_CONFIG_DIR)."
+            Write-Host "  Add it in Docker Desktop -> Settings -> Resources -> File Sharing" -ForegroundColor DarkGray
+            Write-Host "  ccstatusline will proceed without custom config." -ForegroundColor DarkGray
         } else {
-            Write-Ok "Docker ha accesso a CCSTATUSLINE_CONFIG_DIR"
+            Write-Ok "Docker can access CCSTATUSLINE_CONFIG_DIR"
         }
     }
 
     # -- Rimuovi container precedente -------------------------------------------
     if (Test-ContainerExists) {
-        Write-Info "Rimozione container precedente '$cname'..."
+        Write-Info "Removing previous container '$cname'..."
         docker rm -f $cname | Out-Null
     }
 
     # -- Avvia container --------------------------------------------------------
-    Write-Info "Avvio container '$cname'..."
+    Write-Info "Starting container '$cname'..."
     docker run -d `
         --name $cname `
         --cap-add=NET_ADMIN `
@@ -413,91 +432,64 @@ function Invoke-Up {
         -w /workspace `
         "claudebox-img-$proj" `
         sleep infinity | Out-Null
-    Write-Ok "Container avviato"
+    Write-Ok "Container started"
 
     # -- Firewall ---------------------------------------------------------------
-    Write-Info "Inizializzazione firewall..."
+    Write-Info "Initializing firewall..."
     try {
-        # Copia config dall host al volume condiviso se e il primo avvio
+        # Copy config from host to shared volume on first start
         docker exec $cname bash -c 'if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi' | Out-Null
-        # Copia config ccstatusline al primo avvio
+        # Copy ccstatusline config on first start
+        docker exec -u root $cname chown -R node:node /home/node/.config/ccstatusline | Out-Null
         docker exec $cname bash -c 'mkdir -p /home/node/.config/ccstatusline && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' | Out-Null
-        # Fix path Windows -> Linux nei JSON di configurazione di Claude Code
-        # Agisce solo sui file noti che contengono path (NON .claude.json che e testo libero)
+        # Fix Windows -> Linux paths in Claude Code JSON config files
+        # All JS strings use single-quotes: docker exec on Windows strips double-quotes
         docker exec -u node $cname node -e @'
-const fs = require("fs");
-const path = require("path");
-
-const CLAUDE_DIR = "/home/node/.claude";
-
-// Lista esplicita dei file/cartelle che possono contenere path Windows
-// .claude.json escluso: contiene testo libero (memoria, istruzioni) che puo
-// contenere sequenze tipo C:\ per caso, non path reali da fixare
-const TARGET_DIRS = [
-  "plugins",
-  "ide",
-  "config",
-];
-
-const WIN_PATH_RE = /[A-Za-z]:[\\\/][^"
-]*/g;
-
-function fixValue(str) {
-  return str.replace(WIN_PATH_RE, match => {
-    let p = match.replace(/\\/g, "/");
-    p = p.replace(/^[A-Za-z]:\/.*?\.claude/, CLAUDE_DIR);
-    return p;
-  });
-}
-
-function fixJsonFile(filePath) {
+var fs = require('fs'), path = require('path');
+var DIR = '/home/node/.claude';
+var DIRS = ['plugins', 'ide', 'config'];
+var RE = /[A-Za-z]:[\\\/][^'\n]*/g;
+function fixFile(f) {
   try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    WIN_PATH_RE.lastIndex = 0;
-    if (!WIN_PATH_RE.test(raw)) return;
-    WIN_PATH_RE.lastIndex = 0;
-    const fixed = fixValue(raw);
-    if (fixed !== raw) {
-      fs.writeFileSync(filePath, fixed, "utf8");
-      process.stdout.write("Fixed: " + filePath + "\n");
-    }
-  } catch (e) {}
+    var r = fs.readFileSync(f, 'utf8');
+    RE.lastIndex = 0;
+    if (!RE.test(r)) return;
+    RE.lastIndex = 0;
+    var x = r.replace(RE, function(m) {
+      return m.replace(/\\/g, '/').replace(/^[A-Za-z]:\/.*?\.claude/, DIR);
+    });
+    if (x !== r) fs.writeFileSync(f, x, 'utf8');
+  } catch(e) {}
 }
-
-function walk(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch (e) { return; }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full);
-    else if (entry.isFile() && entry.name.endsWith(".json")) fixJsonFile(full);
+function walk(d) {
+  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x){return;}
+  for (var i=0;i<e.length;i++) {
+    var p = path.join(d, e[i].name);
+    if (e[i].isDirectory()) walk(p);
+    else if (e[i].name.slice(-5) === '.json') fixFile(p);
   }
 }
-
-for (const dir of TARGET_DIRS) {
-  walk(path.join(CLAUDE_DIR, dir));
-}
+for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
 '@ 2>$null | Out-Null
         docker exec $cname sudo /usr/local/bin/init-firewall.sh 2>&1 | Out-Null
-        Write-Ok "Firewall applicato"
+        Write-Ok "Firewall applied"
     } catch {
-        Write-Warn "Firewall non applicato (NET_ADMIN potrebbe non essere disponibile)."
+        Write-Warn "Firewall not applied (NET_ADMIN may not be available)."
     }
 
     # -- Verifica isolamento ----------------------------------------------------
-    Write-Header "=== Verifica isolamento container ==="
+    Write-Header "=== Container isolation check ==="
     $workdir = docker exec -u node $cname pwd
     if ($workdir.Trim() -eq '/workspace') {
-        Write-Ok "Isolamento confermato: pwd = /workspace"
+        Write-Ok "Isolation confirmed: pwd = /workspace"
     } else {
-        Write-Err "Isolamento NON verificato: pwd = '$workdir' (atteso /workspace)"
+        Write-Err "Isolation NOT verified: pwd = '$workdir' (expected /workspace)"
     }
 
     # -- Lancio Claude Code interattivo -----------------------------------------
-    Write-Header "=== Avvio Claude Code (--dangerously-skip-permissions) ==="
-    Write-Host "  Il container e' pronto. Lancio Claude Code..." -ForegroundColor Yellow
-    Write-Host "  Digita 'exit' per uscire dalla shell del container.`n" -ForegroundColor Yellow
+    Write-Header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
+    Write-Host "  Container is ready. Launching Claude Code..." -ForegroundColor Yellow
+    Write-Host "  Type 'exit' to leave the container shell.`n" -ForegroundColor Yellow
 
     docker exec -it -u node $cname zsh -c 'claude --dangerously-skip-permissions; exec zsh'
 }
@@ -506,13 +498,13 @@ for (const dir of TARGET_DIRS) {
 function Invoke-Update {
     $dcDir = Join-Path (Get-Location) ".devcontainer"
 
-    Write-Header "=== Aggiornamento file ufficiali Anthropic ==="
+    Write-Header "=== Updating official Anthropic files ==="
 
     if (-not (Test-Path $dcDir)) {
-        Write-Err "Nessun .devcontainer trovato. Esegui prima: claudebox init"
+        Write-Err "No .devcontainer found. Run first: claudebox init"
     }
 
-    Write-Info "Scarico versioni aggiornate da anthropics/claude-code (main)..."
+    Write-Info "Downloading updated files from anthropics/claude-code (main)..."
     Invoke-Download `
         -Url  "$ANTHROPIC_RAW_BASE/Dockerfile" `
         -Dest "$dcDir\Dockerfile" `
@@ -524,8 +516,8 @@ function Invoke-Update {
         -Label "init-firewall.sh"
 
     Write-Host ""
-    Write-Ok "File ufficiali aggiornati. devcontainer.json non modificato."
-    Write-Info "Esegui 'claudebox up' per ricostruire l'immagine con le modifiche."
+    Write-Ok "Official files updated. devcontainer.json unchanged."
+    Write-Info "Run 'claudebox up' to rebuild the image with the updates."
 }
 
 # --- START: init + up in un solo comando --------------------------------------
@@ -536,15 +528,15 @@ function Invoke-Start {
     # -- Banner -----------------------------------------------------------------
     Write-Host ""
     Write-Host "  +======================================================+" -ForegroundColor Blue
-    Write-Host "  |         claudebox  --  avvio automatico              |" -ForegroundColor Blue
+    Write-Host "  |         claudebox  --  automated setup              |" -ForegroundColor Blue
     Write-Host "  +======================================================+" -ForegroundColor Blue
     Write-Host ""
-    Write-Host "  Progetto : " -NoNewline -ForegroundColor DarkGray
+    Write-Host "  Project  : " -NoNewline -ForegroundColor DarkGray
     Write-Host $proj -ForegroundColor White
-    Write-Host "  Cartella : " -NoNewline -ForegroundColor DarkGray
+    Write-Host "  Folder   : " -NoNewline -ForegroundColor DarkGray
     Write-Host (Get-Location).Path -ForegroundColor White
 
-    # -- Risolvi CLAUDE_CONFIG_DIR prima del riepilogo --------------------------
+    # -- Resolve CLAUDE_CONFIG_DIR before showing the summary ------------------
     if (-not $env:CLAUDE_CONFIG_DIR) {
         $candidates = @(
             "$env:USERPROFILE\.claude",
@@ -556,27 +548,24 @@ function Invoke-Start {
         }
     }
 
-    # Se ancora non trovata, chiedi interattivamente
+    # If still not found, ask interactively
     if (-not $env:CLAUDE_CONFIG_DIR -or -not (Test-Path $env:CLAUDE_CONFIG_DIR)) {
         Write-Host ""
-        Write-Warn "CLAUDE_CONFIG_DIR non configurata o non trovata automaticamente."
+        Write-Warn "CLAUDE_CONFIG_DIR not set or not found automatically."
         Write-Host ""
-        Write-Host "  Claude Code salva credenziali e configurazioni in una cartella dedicata." -ForegroundColor DarkGray
-        Write-Host "  Di solito si trova in: $env:USERPROFILE\.claude" -ForegroundColor DarkGray
+        Write-Host "  Claude Code stores credentials and settings in a dedicated folder." -ForegroundColor DarkGray
+        Write-Host "  Usually located at: $env:USERPROFILE\.claude" -ForegroundColor DarkGray
         Write-Host ""
-        $inputDir = Read-Host "  Inserisci il percorso della config Claude (Invio per default: $env:USERPROFILE\.claude)"
-        if ([string]::IsNullOrWhiteSpace($inputDir)) {
-            $inputDir = "$env:USERPROFILE\.claude"
-        }
-        # Crea la cartella se non esiste (primo avvio di Claude Code)
+        $inputDir = Read-InputOrDefault "  Enter Claude config path (press Enter for default: $env:USERPROFILE\.claude)" "$env:USERPROFILE\.claude"
+        # Create directory if missing (first Claude Code run)
         if (-not (Test-Path $inputDir)) {
-            Write-Warn "La cartella '$inputDir' non esiste. La creo ora (verra' popolata da Claude Code al primo avvio)."
+            Write-Warn "Folder '$inputDir' does not exist. Creating it now (will be populated by Claude Code on first run)."
             New-Item -ItemType Directory -Path $inputDir -Force | Out-Null
         }
         $env:CLAUDE_CONFIG_DIR = $inputDir
-        # Salva in modo permanente per le sessioni future
+        # Save permanently for future sessions
         [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $inputDir, 'User')
-        Write-Ok "CLAUDE_CONFIG_DIR impostata permanentemente: $inputDir"
+        Write-Ok "CLAUDE_CONFIG_DIR set permanently: $inputDir"
     }
 
     Write-Host "  Config   : " -NoNewline -ForegroundColor DarkGray
@@ -585,60 +574,59 @@ function Invoke-Start {
     if ($env:CCSTATUSLINE_CONFIG_DIR -and (Test-Path $env:CCSTATUSLINE_CONFIG_DIR)) {
         Write-Host $env:CCSTATUSLINE_CONFIG_DIR -ForegroundColor White
     } else {
-        Write-Host "(non trovata, verra saltata)" -ForegroundColor DarkGray
+        Write-Host "(not found, will be skipped)" -ForegroundColor DarkGray
     }
 
-    # -- Stato attuale ----------------------------------------------------------
+    # -- Current state ----------------------------------------------------------
     $hasDevcontainer = Test-Path "$dcDir\devcontainer.json"
     $containerExists = Test-ContainerExists
     $containerRunning = Test-ContainerRunning
 
-    # Decidiamo qui se fare update, cosi lo includiamo nel riepilogo passi
+    # Decide whether to update here, so we can include it in the step summary
     $doUpdate = $false
     if ($hasDevcontainer) {
         Write-Host ""
-        Write-Host "  +- Dockerfile e init-firewall.sh potrebbero essere datati." -ForegroundColor DarkGray
-        Write-Host "  |  Aggiornare i file ufficiali da Anthropic prima di avviare?" -ForegroundColor DarkGray
-        $updateAnswer = Read-Host "  +- Update? [y/N]"
-        $doUpdate = $updateAnswer.ToLower() -eq 'y'
+        Write-Host "  +- Dockerfile and init-firewall.sh may be outdated." -ForegroundColor DarkGray
+        Write-Host "  |  Update official Anthropic files before starting?" -ForegroundColor DarkGray
+        if ($AutoYes) { $doUpdate = $false }
+        else { $doUpdate = (Read-Host "  +- Update? [y/N]").ToLower() -eq 'y' }
     }
 
     Write-Host ""
-    Write-Host "  Stato attuale:" -ForegroundColor DarkGray
+    Write-Host "  Current state:" -ForegroundColor DarkGray
     Write-Host "    .devcontainer : " -NoNewline -ForegroundColor DarkGray
     if ($hasDevcontainer) {
-        Write-Host "presente" -ForegroundColor Green
+        Write-Host "present" -ForegroundColor Green
     } else {
-        Write-Host "assente  -> verra' creato" -ForegroundColor Yellow
+        Write-Host "missing  -> will be created" -ForegroundColor Yellow
     }
     Write-Host "    Container     : " -NoNewline -ForegroundColor DarkGray
     if ($containerRunning) {
-        Write-Host "in esecuzione -> verra' ricreato" -ForegroundColor Yellow
+        Write-Host "running  -> will be recreated" -ForegroundColor Yellow
     } elseif ($containerExists) {
-        Write-Host "fermo     -> verra' ricreato" -ForegroundColor Yellow
+        Write-Host "stopped  -> will be recreated" -ForegroundColor Yellow
     } else {
-        Write-Host "assente   -> verra' creato" -ForegroundColor Yellow
+        Write-Host "missing  -> will be created" -ForegroundColor Yellow
     }
 
-    # Calcola la numerazione dei passi dinamicamente
+    # Dynamically number the steps
     $step = 1
     Write-Host ""
-    Write-Host "  Passi che verranno eseguiti:" -ForegroundColor DarkGray
+    Write-Host "  Steps to be executed:" -ForegroundColor DarkGray
     if (-not $hasDevcontainer) {
-        Write-Host "    $step. init   -- scarica file ufficiali Anthropic e genera devcontainer.json" -ForegroundColor DarkGray
+        Write-Host "    $step. init   -- download official Anthropic files and generate devcontainer.json" -ForegroundColor DarkGray
         $step++
     } elseif ($doUpdate) {
-        Write-Host "    $step. update -- ri-scarica Dockerfile e init-firewall.sh da Anthropic" -ForegroundColor DarkGray
+        Write-Host "    $step. update -- re-download Dockerfile and init-firewall.sh from Anthropic" -ForegroundColor DarkGray
         $step++
     }
-    Write-Host "    $step. build  -- costruisce l'immagine Docker" -ForegroundColor DarkGray; $step++
-    Write-Host "    $step. run    -- avvia il container e monta le cartelle" -ForegroundColor DarkGray; $step++
-    Write-Host "    $step. check  -- verifica isolamento (pwd = /workspace)" -ForegroundColor DarkGray; $step++
-    Write-Host "    $step. claude -- lancia claude --dangerously-skip-permissions" -ForegroundColor DarkGray
+    Write-Host "    $step. build  -- build the Docker image" -ForegroundColor DarkGray; $step++
+    Write-Host "    $step. run    -- start container and mount directories" -ForegroundColor DarkGray; $step++
+    Write-Host "    $step. check  -- verify isolation (pwd = /workspace)" -ForegroundColor DarkGray; $step++
+    Write-Host "    $step. claude -- launch claude --dangerously-skip-permissions" -ForegroundColor DarkGray
     Write-Host ""
 
-    $confirm = Read-Host "  Avviare? [Y/n]"
-    if ($confirm.ToLower() -eq 'n') { Write-Info "Annullato."; return }
+    if (-not (Confirm-Step "  Start? [Y/n]")) { Write-Info "Cancelled."; return }
 
     # -- Step: init o update ----------------------------------------------------
     if (-not $hasDevcontainer) {
@@ -647,11 +635,11 @@ function Invoke-Start {
         Invoke-Init
     } elseif ($doUpdate) {
         Write-Host ""
-        Write-Header "=== Update file ufficiali Anthropic ==="
+        Write-Header "=== Update official Anthropic files ==="
         Invoke-Update
     } else {
         Write-Host ""
-        Write-Ok "Uso configurazione esistente in $dcDir\ (nessun update richiesto)"
+        Write-Ok "Using existing configuration in $dcDir\ (no update requested)"
     }
 
     # -- Up: build + run + verifica + claude ------------------------------------
@@ -663,40 +651,39 @@ function Invoke-Start {
 function Invoke-Shell {
     $cname = Get-ContainerName
     if (-not (Test-ContainerRunning)) {
-        Write-Err "Container '$cname' non in esecuzione. Usa: claudebox up"
+        Write-Err "Container '$cname' is not running. Use: claudebox up"
     }
-    Write-Info "Apertura shell in '$cname'..."
+    Write-Info "Opening shell in '$cname'..."
     docker exec -it -u node $cname zsh
 }
 
 # --- STOP ----------------------------------------------------------------------
 function Invoke-Stop {
     $cname = Get-ContainerName
-    if (-not (Test-ContainerRunning)) { Write-Info "Container non in esecuzione."; return }
+    if (-not (Test-ContainerRunning)) { Write-Info "Container is not running."; return }
     docker stop $cname | Out-Null
-    Write-Ok "Container '$cname' fermato."
+    Write-Ok "Container '$cname' stopped."
 }
 
 # --- DESTROY -------------------------------------------------------------------
 function Invoke-Destroy {
     $proj  = Get-ProjectName
     $cname = Get-ContainerName
-    Write-Warn "Questa operazione rimuove container, volume history e immagine per '$proj'."
-    Write-Host "  Il volume condiviso 'claudebox-shared-config' NON viene rimosso (condiviso tra progetti)." -ForegroundColor DarkGray
-    $answer = Read-Host "Continuare? [y/N]"
-    if ($answer.ToLower() -ne 'y') { Write-Info "Annullato."; return }
+    Write-Warn "This will remove the container, history volume and image for '$proj'."
+    Write-Host "  Shared volume 'claudebox-shared-config' is NOT removed (shared across projects)." -ForegroundColor DarkGray
+    if (-not (Confirm-Step "Continue? [y/N]")) { Write-Info "Cancelled."; return }
 
     if (Test-ContainerExists) {
         docker rm -f $cname | Out-Null
-        Write-Ok "Container rimosso"
+        Write-Ok "Container removed"
     }
     docker volume rm "claudebox-${proj}-history" 2>$null | Out-Null
-    Write-Ok "Volume history rimosso (se esisteva)"
+    Write-Ok "History volume removed (if it existed)"
     docker rmi "claudebox-img-$proj" 2>$null | Out-Null
-    Write-Ok "Immagine rimossa (se esisteva)"
+    Write-Ok "Image removed (if it existed)"
 
     Write-Host ""
-    Write-Host "  Per rimuovere anche il volume config condiviso (credenziali e impostazioni Claude):" -ForegroundColor DarkGray
+    Write-Host "  To also remove the shared config volume (Claude credentials and settings):" -ForegroundColor DarkGray
     Write-Host "    docker volume rm claudebox-shared-config" -ForegroundColor DarkGray
 }
 
@@ -704,34 +691,35 @@ function Invoke-Destroy {
 function Show-Help {
     Write-Host @"
 
-  claudebox -- devcontainer Claude Code per la cartella corrente
+  claudebox -- isolated Claude Code devcontainer for the current project folder
 
-  USO
-    claudebox <comando>
+  USAGE
+    claudebox <command>
 
-  COMANDI
-    install   Auto-installa lo script nel PATH e crea l'alias nel profilo PS
-    start     Esegue tutto in automatico: init (se serve) + build + run + claude
-    init      Scarica Dockerfile e init-firewall.sh da Anthropic, genera devcontainer.json
-    update    Ri-scarica Dockerfile e init-firewall.sh da Anthropic (senza toccare devcontainer.json)
-    up        Build immagine, avvio container, verifica isolamento, lancia claude
-    shell     Apre una shell nel container gia' avviato
-    stop      Ferma il container (senza rimuoverlo)
-    destroy   Rimuove container, volume history e immagine
+  COMMANDS
+    install   Self-install: copy script to PATH and add alias to PS profile
+    start     Full auto-setup: init (if needed) + build + run + claude
+    init      Download Dockerfile and init-firewall.sh from Anthropic, generate devcontainer.json
+    update    Re-download Dockerfile and init-firewall.sh from Anthropic (devcontainer.json unchanged)
+    up        Build image, start container, verify isolation, launch claude
+    shell     Open a shell in the running container
+    stop      Stop the container (without removing it)
+    destroy   Remove container, history volume and image
 
-  VARIABILI D'AMBIENTE
-    CLAUDE_CONFIG_DIR   Percorso della config Claude Code
-                        (default: ~\.claude se esiste)
+  ENVIRONMENT VARIABLES
+    CLAUDE_CONFIG_DIR   Claude Code config directory
+                        (default: ~\.claude if it exists)
 
-  PRIMA ESECUZIONE
-    # Scarica e installa (una tantum):
+  FIRST RUN
+    # Download and install (one-time):
     .\claudebox.ps1
 
-    # Poi da qualsiasi cartella progetto -- tutto in un comando:
-    cd C:\progetti\mio-progetto
+    # Then from any project folder -- all in one command:
+    cd C:\projects\my-project
     claudebox start
+    claudebox start -y     # skip all confirmations
 
-    # Oppure passo-passo:
+    # Or step by step:
     claudebox init
     claudebox up
 
@@ -739,7 +727,7 @@ function Show-Help {
 }
 
 # --- ENTRY POINT ---------------------------------------------------------------
-# Se eseguito senza argomenti per la prima volta, avvia l'installazione
+# If run without arguments, self-install
 if ($Command -eq '' -or $Command -eq 'install') {
     Invoke-Install
     exit 0
