@@ -168,12 +168,11 @@ function Test-Prerequisites {
     Write-Ok "Docker found: $(docker --version)"
 
     # Docker daemon
-    try {
-        docker info 2>&1 | Out-Null
-        Write-Ok "Docker daemon is running"
-    } catch {
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker daemon is not responding. Start Docker Desktop and try again."
     }
+    Write-Ok "Docker daemon is running"
 
     # CLAUDE_CONFIG_DIR
     if (-not $env:CLAUDE_CONFIG_DIR) {
