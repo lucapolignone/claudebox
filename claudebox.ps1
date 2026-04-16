@@ -82,7 +82,14 @@ function Get-ProjectName {
         ForEach-Object { $_.ToLower().Trim('-') }
 }
 
-function Get-ContainerName { "claudebox-$(Get-ProjectName)" }
+# Il nome del container include il profilo (tranne 'personal', per retrocompatibilità)
+function Get-ContainerName {
+    $base = "claudebox-$(Get-ProjectName)"
+    if ($Profile -ne 'personal' -and $Profile -ne '') {
+        return "$base-$Profile"
+    }
+    return $base
+}
 
 function Test-ContainerExists {
     $name = Get-ContainerName

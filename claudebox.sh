@@ -97,7 +97,15 @@ project_name() {
     basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//'
 }
 
-container_name() { echo "claudebox-$(project_name)"; }
+# Il nome del container include il profilo (tranne 'personal', per retrocompatibilita')
+container_name() {
+    local base="claudebox-$(project_name)"
+    if [ "$PROFILE" != "personal" ] && [ -n "$PROFILE" ]; then
+        echo "${base}-${PROFILE}"
+    else
+        echo "$base"
+    fi
+}
 
 container_exists() {
     docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$(container_name)"
