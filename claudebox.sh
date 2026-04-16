@@ -20,17 +20,29 @@ set -euo pipefail
 
 # -y / --yes flag: skip all confirmation prompts
 AUTO_YES=false
+PROFILE='personal'
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=true ;;
+        -p|--profile) : ;; # handled below with shift
     esac
+done
+# Parse -p/--profile value
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == '-p' || "${args[$i]}" == '--profile' ]]; then
+        PROFILE="${args[$((i+1))]:-personal}"
+    fi
 done
 
 confirm_step() {
     local prompt="$1"
     $AUTO_YES && return 0
     read -rp "$prompt" _r
-    [ "${_r,,}" != "n" ]
+    # FIX: ${var,,} richiede bash 4+. macOS di default ha bash 3.2 -> usiamo tr.
+    local _r_lower
+    _r_lower=$(printf '%s' "$_r" | tr '[:upper:]' '[:lower:]')
+    [ "$_r_lower" != "n" ]
 }
 
 read_input_or_default() {
@@ -38,6 +50,18 @@ read_input_or_default() {
     if $AUTO_YES; then echo "$default"; return; fi
     read -rp "$prompt" _v
     echo "${_v:-$default}"
+}
+
+# ── Profile resolution ─────────────────────────────────────────────────────────
+resolve_profile() {
+    local prof="${1:-personal}"
+    if [ "$prof" = 'personal' ]; then echo "$HOME/.claude"
+    else echo "$HOME/.claude-$prof"; fi
+}
+volume_suffix() {
+    local prof="${1:-personal}"
+    if [ "$prof" = 'personal' ]; then echo 'personal'
+    else echo "$prof"; fi
 }
 
 # ── Colori ─────────────────────────────────────────────────────────────────────
@@ -51,6 +75,24 @@ err()    { echo -e "  ${RED}ERR${NC} $*" >&2; exit 1; }
 header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
+# FIX: realpath non esiste di default su macOS. _resolve_path e' un fallback portabile
+# (coreutils -> python3 -> cd/pwd) che funziona anche quando il path non esiste.
+_resolve_path() {
+    local p="$1"
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$p" 2>/dev/null || printf '%s' "$p"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$p" 2>/dev/null \
+            || printf '%s' "$p"
+    else
+        local dir file
+        dir="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || true
+        file="$(basename "$p")"
+        if [ -n "$dir" ]; then printf '%s/%s' "$dir" "$file"
+        else printf '%s' "$p"; fi
+    fi
+}
+
 project_name() {
     basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//'
 }
@@ -105,7 +147,8 @@ cmd_install() {
     fi
 
     local dest="$install_dir/claudebox"
-    if [ "$(realpath "$source_script" 2>/dev/null || echo "$source_script")" = "$(realpath "$dest" 2>/dev/null || echo "$dest")" ]; then
+    # FIX: usiamo _resolve_path (portabile anche su macOS senza coreutils)
+    if [ "$(_resolve_path "$source_script")" = "$(_resolve_path "$dest")" ]; then
         ok "Already installed at: $dest"
     else
         info "Copying script to: $dest"
@@ -123,7 +166,12 @@ cmd_install() {
     fi
 
     local path_line="export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$PATH\""
-    if ! grep -q 'claudebox\|\.local/bin' "$shell_rc" 2>/dev/null; then
+    # FIX: se shell_rc non esiste ancora (utenza nuova), lo creiamo vuoto prima
+    # del grep per evitare che l'append dipenda dall'ordine di esistenza.
+    [ -f "$shell_rc" ] || touch "$shell_rc"
+    # FIX: 'A\|B' e' alternation GNU (BRE extended). BSD grep su macOS non lo
+    # interpreta. -E attiva ERE in modo portabile su tutte le piattaforme.
+    if ! grep -qE 'claudebox|\.local/bin' "$shell_rc" 2>/dev/null; then
         echo "" >> "$shell_rc"
         echo "# claudebox (added by claudebox.sh)" >> "$shell_rc"
         echo "$path_line" >> "$shell_rc"
@@ -158,21 +206,24 @@ check_prerequisites() {
     docker info &>/dev/null || err "Docker daemon is not responding. Start Docker Desktop and try again."
     ok "Docker daemon is running"
 
-    # CLAUDE_CONFIG_DIR
-    if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
-        for candidate in "$HOME/.claude" "$HOME/.config/claude"; do
-            if [ -d "$candidate" ]; then
-                export CLAUDE_CONFIG_DIR="$candidate"
-                warn "CLAUDE_CONFIG_DIR not set; using: $candidate"
-                break
-            fi
-        done
-        if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
-            err "CLAUDE_CONFIG_DIR not set and no Claude folder found.\nSet the variable:\n  export CLAUDE_CONFIG_DIR=~/.claude\nAdd this line to your .zshrc/.bashrc to make it permanent."
-        fi
+    # CLAUDE_CONFIG_DIR -- resolved from PROFILE
+    local profile_dir
+    profile_dir=$(resolve_profile "$PROFILE")
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$PROFILE" = "personal" ]; then
+        profile_dir="$CLAUDE_CONFIG_DIR"
     fi
-    [ -d "$CLAUDE_CONFIG_DIR" ] || err "CLAUDE_CONFIG_DIR='$CLAUDE_CONFIG_DIR' non esiste."
-    ok "CLAUDE_CONFIG_DIR -> $CLAUDE_CONFIG_DIR"
+    export CLAUDE_CONFIG_DIR="$profile_dir"
+    if [ ! -d "$CLAUDE_CONFIG_DIR" ]; then
+        warn "Profile directory does not exist. Creating: $CLAUDE_CONFIG_DIR"
+        mkdir -p "$CLAUDE_CONFIG_DIR"
+    fi
+    ok "Profile '$PROFILE' -> $CLAUDE_CONFIG_DIR"
+
+    # CLAUDE_PLUGINS_DIR (derived from CLAUDE_CONFIG_DIR)
+    if [ -z "${CLAUDE_PLUGINS_DIR:-}" ]; then
+        export CLAUDE_PLUGINS_DIR="$CLAUDE_CONFIG_DIR/plugins"
+    fi
+    ok "CLAUDE_PLUGINS_DIR -> $CLAUDE_PLUGINS_DIR"
 
     # CCSTATUSLINE_CONFIG_DIR (optional)
     if [ -z "${CCSTATUSLINE_CONFIG_DIR:-}" ]; then
@@ -220,6 +271,7 @@ cmd_init() {
   "workspaceMount": "source=\${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "mounts": [
     "source=\${localEnv:CLAUDE_CONFIG_DIR},target=/host-claude,type=bind,readonly=true,consistency=cached",
+    "source=\${localEnv:CLAUDE_PLUGINS_DIR},target=/host-claude-plugins,type=bind,readonly=true,consistency=cached",
     "source=\${localEnv:CCSTATUSLINE_CONFIG_DIR},target=/host-ccstatusline,type=bind,readonly=true,consistency=cached",
     "source=claudebox-shared-config,target=/home/node/.claude,type=volume",
     "source=claudebox-shared-ccstatusline,target=/home/node/.config/ccstatusline,type=volume",
@@ -228,6 +280,7 @@ cmd_init() {
   "remoteUser": "node",
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+    "CLAUDE_PLUGINS_DIR": "/home/node/.claude/plugins",
     "CCSTATUSLINE_CONFIG_DIR": "/home/node/.config/ccstatusline",
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "DEVCONTAINER": "true",
@@ -237,7 +290,7 @@ cmd_init() {
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW"
   ],
-  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
+  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -311,6 +364,22 @@ cmd_up() {
         fi
     fi
 
+    # Detect if this is a new profile (volume does not exist yet)
+    local vol_suffix; vol_suffix=$(volume_suffix "$PROFILE")
+    local config_vol="claudebox-shared-config-$vol_suffix"
+    local is_new_profile=false
+    if [ "$PROFILE" != "personal" ]; then
+        if ! docker volume ls --format "{{.Name}}" 2>/dev/null | grep -qx "$config_vol"; then
+            is_new_profile=true
+            info "New profile '$PROFILE' -- seeding from personal config..."
+            docker run --rm \
+                -v "claudebox-shared-config-personal:/src:ro" \
+                -v "${config_vol}:/dst" \
+                alpine sh -c 'cp -a /src/. /dst/' >/dev/null
+            ok "Volume '$config_vol' seeded from personal"
+        fi
+    fi
+
     # Remove previous container
     if container_exists; then
         info "Removing previous container '$cname'..."
@@ -325,11 +394,13 @@ cmd_up() {
         --cap-add=NET_RAW \
         -v "$(pwd):/workspace:cached" \
         -v "${CLAUDE_CONFIG_DIR}:/host-claude:ro" \
+        -v "${CLAUDE_PLUGINS_DIR}:/host-claude-plugins:ro" \
         -v "${CCSTATUSLINE_CONFIG_DIR:-/dev/null}:/host-ccstatusline:ro" \
-        -v "claudebox-shared-config:/home/node/.claude" \
-        -v "claudebox-shared-ccstatusline:/home/node/.config/ccstatusline" \
+        -v "claudebox-shared-config-$(volume_suffix "$PROFILE"):/home/node/.claude" \
+        -v "claudebox-shared-ccstatusline-$(volume_suffix "$PROFILE"):/home/node/.config/ccstatusline" \
         -v "claudebox-${proj}-history:/commandhistory" \
         -e CLAUDE_CONFIG_DIR="/home/node/.claude" \
+        -e CLAUDE_PLUGINS_DIR="/home/node/.claude/plugins" \
         -e CCSTATUSLINE_CONFIG_DIR="/home/node/.config/ccstatusline" \
         -w /workspace \
         "claudebox-img-$proj" \
@@ -351,18 +422,31 @@ cmd_up() {
         'mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline' >/dev/null
     docker exec "$cname" bash -c \
         'if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi' >/dev/null
+    docker exec -u root "$cname" chown -R node:node /home/node/.claude/plugins >/dev/null
+    docker exec "$cname" bash -c \
+        'cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true' >/dev/null
     docker exec -u root "$cname" chown -R node:node /home/node/.config/ccstatusline >/dev/null
     docker exec "$cname" bash -c \
         'if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' >/dev/null
 
     # Fix host paths -> container paths in Claude Code JSON config files
-    # 1. Structured fix for installed_plugins.json (installPath fields)
-    # 2. Generic regex scan on plugins/, ide/, config/ directories
-    docker exec -u node "$cname" node -e '
+    # Written to /tmp via heredoc to avoid single-quote issues in node -e
+    docker exec -u node "$cname" bash -c 'cat > /tmp/claudebox-fix-paths.js' << 'JSEOF'
 var fs = require("fs"), path = require("path");
 var DIR = "/home/node/.claude";
 
-// Fix installed_plugins.json - structured approach for installPath fields
+var km = path.join(DIR, "plugins/known_marketplaces.json");
+if (fs.existsSync(km)) {
+  try {
+    var d = JSON.parse(fs.readFileSync(km, "utf8"));
+    for (var k in d) {
+      if (d[k].installLocation)
+        d[k].installLocation = DIR + "/plugins/marketplaces/" + k;
+    }
+    fs.writeFileSync(km, JSON.stringify(d, null, 2), "utf8");
+  } catch(e) {}
+}
+
 var ip = path.join(DIR, "plugins/installed_plugins.json");
 if (fs.existsSync(ip)) {
   try {
@@ -371,9 +455,8 @@ if (fs.existsSync(ip)) {
     for (var k in data.plugins) {
       (data.plugins[k] || []).forEach(function(e) {
         if (e.installPath) {
-          var fixed = e.installPath
-            .replace(/^[A-Za-z]:[\\\/].*?\.claude/, DIR)
-            .replace(/^\/(?:Users|home)\/[^\/]+\/.claude/, DIR);
+          var p = e.installPath.replace(/\\\\/g, "/").replace(/\\/g, "/").replace(/\/+/g, "/");
+          var fixed = p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
           if (fixed !== e.installPath) { e.installPath = fixed; changed = true; }
         }
       });
@@ -382,32 +465,33 @@ if (fs.existsSync(ip)) {
   } catch(e) {}
 }
 
-// Generic regex scan for remaining JSON files in known directories
 var DIRS = ["plugins", "ide", "config"];
-var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[\s\S]*?(?="|\n)/g;
+var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)(?:[^"\n])+/g;
+function fixPath(m) {
+  var p = m.replace(/\\\\/g, "/").replace(/\\/g, "/").replace(/\/+/g, "/");
+  return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
+}
 function fixFile(f) {
   try {
     var r = fs.readFileSync(f, "utf8");
     RE.lastIndex = 0;
     if (!RE.test(r)) return;
     RE.lastIndex = 0;
-    var x = r.replace(RE, function(m) {
-      var p = m.replace(/\\/g, "/");
-      return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
-    });
+    var x = r.replace(RE, fixPath);
     if (x !== r) fs.writeFileSync(f, x, "utf8");
   } catch(e) {}
 }
 function walk(d) {
-  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x){return;}
-  for (var i=0;i<e.length;i++) {
+  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x) { return; }
+  for (var i = 0; i < e.length; i++) {
     var p = path.join(d, e[i].name);
     if (e[i].isDirectory()) walk(p);
     else if (e[i].name.slice(-5) === ".json") fixFile(p);
   }
 }
-for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
-' 2>/dev/null || true
+for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
+JSEOF
+    docker exec -u node "$cname" node /tmp/claudebox-fix-paths.js 2>/dev/null || true
 
     # Verify isolation
     header "=== Container isolation check ==="
@@ -420,11 +504,19 @@ for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
     fi
 
     # Launch Claude Code
-    header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
-    echo -e "  ${YELLOW}Il container e pronto. Lancio Claude Code...${NC}"
-    echo -e "  ${YELLOW}Digita 'exit' per uscire dalla shell del container.${NC}\n"
-    docker exec -it -u node "$cname" \
-        zsh -c 'claude --dangerously-skip-permissions; exec zsh'
+    if $is_new_profile; then
+        header "=== First login for profile '$PROFILE' ==="
+        echo -e "  ${YELLOW}Please log in with your account for this profile.${NC}"
+        echo -e "  ${YELLOW}After login, Claude Code will start automatically.\n${NC}"
+        docker exec -it -u node "$cname" \
+            zsh -c 'claude login && claude --dangerously-skip-permissions; exec zsh'
+    else
+        header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
+        echo -e "  ${YELLOW}Container is ready. Launching Claude Code...${NC}"
+        echo -e "  ${YELLOW}Type 'exit' to leave the container shell.\n${NC}"
+        docker exec -it -u node "$cname" \
+            zsh -c 'claude --dangerously-skip-permissions; exec zsh'
+    fi
 }
 
 # ── UPDATE ──────────────────────────────────────────────────────────────────────
@@ -499,7 +591,9 @@ cmd_start() {
         [ -d "$cc_default" ] && export CCSTATUSLINE_CONFIG_DIR="$cc_default"
     fi
 
+    echo    "  Profile  : $PROFILE"
     echo    "  Config   : $CLAUDE_CONFIG_DIR"
+    echo    "  Plugins  : $CLAUDE_CONFIG_DIR/plugins"
     echo -n "  ccstatus : "
     if [ -n "${CCSTATUSLINE_CONFIG_DIR:-}" ] && [ -d "${CCSTATUSLINE_CONFIG_DIR}" ]; then
         echo "$CCSTATUSLINE_CONFIG_DIR"
@@ -515,8 +609,14 @@ cmd_start() {
         echo ""
         echo "  +- Dockerfile and init-firewall.sh may be outdated."
         echo "  |  Update official Anthropic files before starting?"
-        if $AUTO_YES; then do_update=false
-        else read -rp "  +- Update? [y/N] " update_answer; [ "${update_answer,,}" = "y" ] && do_update=true || true; fi
+        if $AUTO_YES; then
+            do_update=false
+        else
+            read -rp "  +- Update? [y/N] " update_answer
+            # FIX: ${var,,} richiede bash 4+. Usiamo tr per portabilita' (macOS).
+            _ans_lower=$(printf '%s' "$update_answer" | tr '[:upper:]' '[:lower:]')
+            if [ "$_ans_lower" = "y" ]; then do_update=true; fi
+        fi
     fi
 
     # Current state
@@ -588,7 +688,8 @@ cmd_destroy() {
     cname="$(container_name)"
 
     warn "This will remove the container, history volume and image for '$proj'."
-    echo  "  Shared volume 'claudebox-shared-config' is NOT removed (shared across projects)."
+    echo  "  Shared volumes for profile '$PROFILE' are NOT removed."
+    echo  "  To remove: docker volume rm claudebox-shared-config-$(volume_suffix \"$PROFILE\") claudebox-shared-ccstatusline-$(volume_suffix \"$PROFILE\")"
     confirm_step "Continue? [y/N] " || { info "Cancelled."; return; }
 
     container_exists && { docker rm -f "$cname" >/dev/null; ok "Container rimosso"; }
@@ -630,7 +731,9 @@ cmd_help() {
     # Then from any project folder -- all in one command:
     cd ~/projects/my-project
     claudebox start
-    claudebox start -y     # skip all confirmations
+    claudebox start -y                    # skip all confirmations
+    claudebox start -p work               # use work profile (~/.claude-work)
+    claudebox start -p work -y            # work profile, no prompts
 
     # Or step by step:
     claudebox init

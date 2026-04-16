@@ -33,7 +33,11 @@ param(
 
     [Parameter()]
     [Alias('y')]
-    [switch]$AutoYes
+    [switch]$AutoYes,
+
+    [Parameter()]
+    [Alias('p')]
+    [string]$Profile = 'personal'
 )
 
 Set-StrictMode -Version Latest
@@ -50,6 +54,16 @@ function Read-InputOrDefault ($prompt, $default) {
     $r = Read-Host $prompt
     if ([string]::IsNullOrWhiteSpace($r)) { return $default }
     return $r
+}
+
+# --- Profile resolution --------------------------------------------------------
+function Resolve-Profile ([string]$prof) {
+    if ($prof -eq 'personal' -or $prof -eq '') { return "$env:USERPROFILE\.claude" }
+    return "$env:USERPROFILE\.claude-$prof"
+}
+function Get-VolumeSuffix ([string]$prof) {
+    if ($prof -eq 'personal' -or $prof -eq '') { return 'personal' }
+    return $prof
 }
 
 # --- Colori / output helpers ---------------------------------------------------
@@ -104,12 +118,30 @@ function Invoke-Install {
 
     $installDir  = Get-InstallDir
     $destScript  = Join-Path $installDir 'claudebox.ps1'
-    $sourceScript = $MyInvocation.PSCommandPath
 
-    # 1. Copy script
-    Write-Info "Copying script to: $destScript"
-    Copy-Item -Path $sourceScript -Destination $destScript -Force
-    Write-Ok "Script copied"
+    # FIX: $MyInvocation.PSCommandPath dentro una funzione si riferisce al chiamante
+    # della funzione, non allo script. Usiamo $PSCommandPath (variabile automatica
+    # a livello script) con fallback a $MyInvocation.MyCommand.Path e Definition.
+    $sourceScript = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($sourceScript) -and $MyInvocation.MyCommand) {
+        $sourceScript = $MyInvocation.MyCommand.Path
+    }
+    if ([string]::IsNullOrWhiteSpace($sourceScript) -and $MyInvocation.MyCommand) {
+        $sourceScript = $MyInvocation.MyCommand.Definition
+    }
+    if ([string]::IsNullOrWhiteSpace($sourceScript) -or -not (Test-Path -LiteralPath $sourceScript)) {
+        Write-Err "Cannot determine path of current script. Run it via '.\claudebox.ps1' (not piped through iex)."
+    }
+
+    # Se siamo già installati nella destinazione, evitiamo la copia su se stessi
+    if ((Resolve-Path -LiteralPath $sourceScript).Path -eq $destScript) {
+        Write-Ok "Script already at destination: $destScript"
+    } else {
+        # 1. Copy script
+        Write-Info "Copying script to: $destScript"
+        Copy-Item -LiteralPath $sourceScript -Destination $destScript -Force
+        Write-Ok "Script copied"
+    }
 
     # 2. Add directory to user PATH (if not already there)
     $currentPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
@@ -123,19 +155,49 @@ function Invoke-Install {
     }
 
     # 3. Add alias to PowerShell profile
-    $profilePath = $PROFILE.CurrentUserAllHosts
-    $profileDir  = Split-Path $profilePath
-    if (-not (Test-Path $profileDir)) {
+    #
+    # BUG STORICO: questo script ha un parametro `-Profile` che -- essendo PowerShell
+    # case-insensitive sui nomi di variabili -- oscura la variabile automatica
+    # `$PROFILE` (il path del profilo di PowerShell). Nel codice originale
+    # `$PROFILE -is [string] -and $PROFILE -ne ''` era sempre vero con valore
+    # 'personal' (il default del parametro), quindi $profilePath diventava 'personal'
+    # e `Split-Path 'personal'` restituiva stringa vuota -> Test-Path '' -> errore:
+    # "Impossibile associare l'argomento al parametro 'Path' perché è una stringa vuota".
+    #
+    # FIX: leggiamo esplicitamente la variabile automatica dallo scope globale e
+    # aggiungiamo fallback difensivi per ogni possibile valore vuoto.
+    $psProfile = Get-Variable -Name 'PROFILE' -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+
+    $profilePath = ''
+    if ($psProfile) {
+        # $PROFILE e' una stringa "arricchita" con proprieta' (CurrentUserAllHosts, ecc.).
+        # Il cast a stringa restituisce il path CurrentUserCurrentHost, che e' quello che vogliamo.
+        $profilePath = "$psProfile"
+    }
+    if ([string]::IsNullOrWhiteSpace($profilePath)) {
+        # Fallback: costruiamo un path standard
+        $docs = [Environment]::GetFolderPath('MyDocuments')
+        if ([string]::IsNullOrWhiteSpace($docs)) { $docs = Join-Path $env:USERPROFILE 'Documents' }
+        $psDirName = if ($PSVersionTable.PSVersion.Major -ge 6) { 'PowerShell' } else { 'WindowsPowerShell' }
+        $profilePath = Join-Path $docs (Join-Path $psDirName 'Microsoft.PowerShell_profile.ps1')
+    }
+
+    $profileDir = Split-Path -Path $profilePath -Parent
+    if ([string]::IsNullOrWhiteSpace($profileDir)) {
+        # Ultimo baluardo: se Split-Path fallisce, andiamo in Documents
+        $profileDir = Join-Path $env:USERPROFILE 'Documents'
+    }
+    if (-not (Test-Path -LiteralPath $profileDir)) {
         New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
     }
-    if (-not (Test-Path $profilePath)) {
+    if (-not (Test-Path -LiteralPath $profilePath)) {
         New-Item -ItemType File -Path $profilePath -Force | Out-Null
     }
 
     $aliasLine = "function claudebox { & '$destScript' @args }"
-    $profileContent = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+    $profileContent = Get-Content -LiteralPath $profilePath -Raw -ErrorAction SilentlyContinue
     if ($profileContent -notlike "*claudebox*") {
-        Add-Content -Path $profilePath -Value "`n# claudebox alias (added by claudebox.ps1)`n$aliasLine"
+        Add-Content -LiteralPath $profilePath -Value "`n# claudebox alias (added by claudebox.ps1)`n$aliasLine"
         Write-Ok "Alias 'claudebox' added to profile: $profilePath"
     } else {
         Write-Info "Alias 'claudebox' already present in profile"
@@ -147,7 +209,8 @@ function Invoke-Install {
     Write-Host ""
     Write-Ok "Installation complete!"
     Write-Host ""
-    Write-Host "  Restart PowerShell (or run: . `$PROFILE) to use" -ForegroundColor White
+    # Usiamo $global:PROFILE per evitare che il template mostri il valore del parametro -Profile
+    Write-Host "  Restart PowerShell (or run: . `$global:PROFILE) to use" -ForegroundColor White
     Write-Host "  the 'claudebox' command from any folder." -ForegroundColor White
     Write-Host ""
     Write-Host "  Quick start:" -ForegroundColor White
@@ -168,41 +231,23 @@ function Test-Prerequisites {
     Write-Ok "Docker found: $(docker --version)"
 
     # Docker daemon
-    docker info 2>&1 | Out-Null
+    $null = docker version 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker daemon is not responding. Start Docker Desktop and try again."
     }
     Write-Ok "Docker daemon is running"
 
-    # CLAUDE_CONFIG_DIR
-    if (-not $env:CLAUDE_CONFIG_DIR) {
-        $candidates = @(
-            "$env:USERPROFILE\.claude",
-            "$env:APPDATA\claude",
-            "$env:USERPROFILE\.config\claude"
-        )
-        foreach ($c in $candidates) {
-            if (Test-Path $c) {
-                $env:CLAUDE_CONFIG_DIR = $c
-                Write-Warn "CLAUDE_CONFIG_DIR not set; using: $c"
-                break
-            }
-        }
-        if (-not $env:CLAUDE_CONFIG_DIR) {
-            Write-Err (@"
-CLAUDE_CONFIG_DIR is not set and no Claude folder was found.
-Set the variable before using this command:
-  `$env:CLAUDE_CONFIG_DIR = "`$env:USERPROFILE\.claude"
-Or permanently:
-  [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', "`$env:USERPROFILE\.claude", 'User')
-"@)
-        }
+    # CLAUDE_CONFIG_DIR -- resolved from -Profile parameter
+    $profileDir = Resolve-Profile $Profile
+    if ($env:CLAUDE_CONFIG_DIR -and $Profile -eq 'personal') {
+        $profileDir = $env:CLAUDE_CONFIG_DIR
     }
-
+    $env:CLAUDE_CONFIG_DIR = $profileDir
     if (-not (Test-Path $env:CLAUDE_CONFIG_DIR)) {
-        Write-Err "CLAUDE_CONFIG_DIR='$env:CLAUDE_CONFIG_DIR' does not exist."
+        Write-Warn "Profile directory does not exist. Creating: $env:CLAUDE_CONFIG_DIR"
+        New-Item -ItemType Directory -Path $env:CLAUDE_CONFIG_DIR -Force | Out-Null
     }
-    Write-Ok "CLAUDE_CONFIG_DIR -> $env:CLAUDE_CONFIG_DIR"
+    Write-Ok "Profile '$Profile' -> $env:CLAUDE_CONFIG_DIR"
 
     # CLAUDE_PLUGINS_DIR (derived from CLAUDE_CONFIG_DIR)
     if (-not $env:CLAUDE_PLUGINS_DIR) {
@@ -355,7 +400,8 @@ function Invoke-Up {
 
     $proj  = Get-ProjectName
     $cname = Get-ContainerName
-    $pwd   = (Get-Location).Path
+    # NOTA: evitiamo di sovrascrivere $PWD (variabile automatica di PowerShell)
+    $currentDir = (Get-Location).Path
 
     # Normalize path for Docker (convert backslash -> slash and C: -> /c)
     # Convert C:\foo\bar -> /c/foo/bar (scriptblock in -replace does not work in PS 5.x)
@@ -366,7 +412,7 @@ function Invoke-Up {
         }
         return $p
     }
-    $dockerWorkspace        = Convert-ToDockerPath $pwd
+    $dockerWorkspace        = Convert-ToDockerPath $currentDir
     $dockerConfigDir        = Convert-ToDockerPath $env:CLAUDE_CONFIG_DIR
     $dockerPluginsDir       = Convert-ToDockerPath $env:CLAUDE_PLUGINS_DIR
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
@@ -417,6 +463,25 @@ function Invoke-Up {
         }
     }
 
+    # -- Detect if this is a new profile (volume does not exist yet) ------------
+    $volSuffix    = Get-VolumeSuffix $Profile
+    $configVol    = "claudebox-shared-config-$volSuffix"
+    $personalVol  = 'claudebox-shared-config-personal'
+    $isNewProfile = $false
+    if ($Profile -ne 'personal') {
+        $existingVols = docker volume ls --format '{{.Name}}' 2>$null
+        if ($existingVols -notcontains $configVol) {
+            $isNewProfile = $true
+            Write-Info "New profile '$Profile' -- seeding from personal config..."
+            # Create the new volume by copying from personal
+            docker run --rm `
+                -v "${personalVol}:/src:ro" `
+                -v "${configVol}:/dst" `
+                alpine sh -c 'cp -a /src/. /dst/' | Out-Null
+            Write-Ok "Volume '$configVol' seeded from '$personalVol'"
+        }
+    }
+
     # -- Rimuovi container precedente -------------------------------------------
     if (Test-ContainerExists) {
         Write-Info "Removing previous container '$cname'..."
@@ -433,8 +498,8 @@ function Invoke-Up {
         -v "${dockerConfigDir}:/host-claude:ro" `
         -v "${dockerPluginsDir}:/host-claude-plugins:ro" `
         -v "${dockerCcstatuslineDir}:/host-ccstatusline:ro" `
-        -v "claudebox-shared-config:/home/node/.claude" `
-        -v "claudebox-shared-ccstatusline:/home/node/.config/ccstatusline" `
+        -v "claudebox-shared-config-$(Get-VolumeSuffix $Profile):/home/node/.claude" `
+        -v "claudebox-shared-ccstatusline-$(Get-VolumeSuffix $Profile):/home/node/.config/ccstatusline" `
         -v "claudebox-${proj}-history:/commandhistory" `
         -e CLAUDE_CONFIG_DIR="/home/node/.claude" `
         -e CLAUDE_PLUGINS_DIR="/home/node/.claude/plugins" `
@@ -456,14 +521,25 @@ function Invoke-Up {
         docker exec -u root $cname chown -R node:node /home/node/.config/ccstatusline | Out-Null
         docker exec $cname bash -c 'mkdir -p /home/node/.config/ccstatusline && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' | Out-Null
         # Fix host paths -> container paths in Claude Code JSON config files
-        # 1. Structured fix for installed_plugins.json (installPath fields)
-        # 2. Generic regex scan on plugins/, ide/, config/ directories
-        # All JS strings use single-quotes: docker exec on Windows strips double-quotes
-        docker exec -u node $cname node -e @'
+        # Written to a temp file and copied via docker cp to avoid all quote-stripping issues
+        $fixJs = @'
 var fs = require('fs'), path = require('path');
 var DIR = '/home/node/.claude';
 
-// Fix installed_plugins.json - structured approach for installPath fields
+// 1. Structured fix for known_marketplaces.json
+var km = path.join(DIR, 'plugins/known_marketplaces.json');
+if (fs.existsSync(km)) {
+  try {
+    var d = JSON.parse(fs.readFileSync(km, 'utf8'));
+    for (var k in d) {
+      if (d[k].installLocation)
+        d[k].installLocation = DIR + '/plugins/marketplaces/' + k;
+    }
+    fs.writeFileSync(km, JSON.stringify(d, null, 2), 'utf8');
+  } catch(e) {}
+}
+
+// 2. Structured fix for installed_plugins.json installPath fields
 var ip = path.join(DIR, 'plugins/installed_plugins.json');
 if (fs.existsSync(ip)) {
   try {
@@ -472,9 +548,8 @@ if (fs.existsSync(ip)) {
     for (var k in data.plugins) {
       (data.plugins[k] || []).forEach(function(e) {
         if (e.installPath) {
-          var fixed = e.installPath
-            .replace(/^[A-Za-z]:[\\\/].*?\.claude/, DIR)
-            .replace(/^\/(?:Users|home)\/[^/]+\/\.claude/, DIR);
+          var p = e.installPath.replace(/\\\\/g, '/').replace(/\\/g, '/').replace(/\/+/g, '/');
+          var fixed = p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
           if (fixed !== e.installPath) { e.installPath = fixed; changed = true; }
         }
       });
@@ -483,32 +558,39 @@ if (fs.existsSync(ip)) {
   } catch(e) {}
 }
 
-// Generic regex scan for remaining JSON files in known directories
+// 3. Generic regex scan on plugins/, ide/, config/
+// Matches Windows (C:\\ or C:/) and Unix (/Users/ or /home/) paths
 var DIRS = ['plugins', 'ide', 'config'];
-var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)[^'\n"]*/g;
+var RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home)\/)(?:[^'"\n])+/g;
+function fixPath(m) {
+  var p = m.replace(/\\\\/g, '/').replace(/\\/g, '/').replace(/\/+/g, '/');
+  return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^\/]+\/).*?\.claude/, DIR);
+}
 function fixFile(f) {
   try {
     var r = fs.readFileSync(f, 'utf8');
     RE.lastIndex = 0;
     if (!RE.test(r)) return;
     RE.lastIndex = 0;
-    var x = r.replace(RE, function(m) {
-      var p = m.replace(/\\/g, '/');
-      return p.replace(/^(?:[A-Za-z]:\/|\/(?:Users|home)\/[^/]+\/).*?\.claude/, DIR);
-    });
+    var x = r.replace(RE, fixPath);
     if (x !== r) fs.writeFileSync(f, x, 'utf8');
   } catch(e) {}
 }
 function walk(d) {
-  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x){return;}
-  for (var i=0;i<e.length;i++) {
+  var e; try { e = fs.readdirSync(d, {withFileTypes:true}); } catch(x) { return; }
+  for (var i = 0; i < e.length; i++) {
     var p = path.join(d, e[i].name);
     if (e[i].isDirectory()) walk(p);
     else if (e[i].name.slice(-5) === '.json') fixFile(p);
   }
 }
-for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
-'@ 2>$null | Out-Null
+for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
+'@
+        $tmpJs = Join-Path $env:TEMP 'claudebox-fix-paths.js'
+        [System.IO.File]::WriteAllText($tmpJs, $fixJs)
+        docker cp $tmpJs "${cname}:/tmp/claudebox-fix-paths.js" | Out-Null
+        docker exec -u node $cname node /tmp/claudebox-fix-paths.js 2>$null | Out-Null
+        Remove-Item $tmpJs -ErrorAction SilentlyContinue
         docker exec $cname sudo /usr/local/bin/init-firewall.sh 2>&1 | Out-Null
         Write-Ok "Firewall applied"
     } catch {
@@ -525,11 +607,17 @@ for (var i=0;i<DIRS.length;i++) walk(path.join(DIR, DIRS[i]));
     }
 
     # -- Lancio Claude Code interattivo -----------------------------------------
-    Write-Header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
-    Write-Host "  Container is ready. Launching Claude Code..." -ForegroundColor Yellow
-    Write-Host "  Type 'exit' to leave the container shell.`n" -ForegroundColor Yellow
-
-    docker exec -it -u node $cname zsh -c 'claude --dangerously-skip-permissions; exec zsh'
+    if ($isNewProfile) {
+        Write-Header "=== First login for profile '$Profile' ==="
+        Write-Host "  Please log in with your account for this profile." -ForegroundColor Yellow
+        Write-Host "  After login, Claude Code will start automatically.`n" -ForegroundColor Yellow
+        docker exec -it -u node $cname zsh -c 'claude login && claude --dangerously-skip-permissions; exec zsh'
+    } else {
+        Write-Header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
+        Write-Host "  Container is ready. Launching Claude Code..." -ForegroundColor Yellow
+        Write-Host "  Type 'exit' to leave the container shell.`n" -ForegroundColor Yellow
+        docker exec -it -u node $cname zsh -c 'claude --dangerously-skip-permissions; exec zsh'
+    }
 }
 
 # --- UPDATE: ri-scarica Dockerfile e init-firewall.sh da Anthropic ------------
@@ -571,6 +659,9 @@ function Invoke-Start {
     Write-Host ""
     Write-Host "  Project  : " -NoNewline -ForegroundColor DarkGray
     Write-Host $proj -ForegroundColor White
+    Write-Host "  Profile  : " -NoNewline -ForegroundColor DarkGray
+    if ($Profile -eq "personal") { Write-Host $Profile -ForegroundColor White }
+    else { Write-Host $Profile -ForegroundColor Cyan }
     Write-Host "  Folder   : " -NoNewline -ForegroundColor DarkGray
     Write-Host (Get-Location).Path -ForegroundColor White
 
@@ -710,7 +801,8 @@ function Invoke-Destroy {
     $proj  = Get-ProjectName
     $cname = Get-ContainerName
     Write-Warn "This will remove the container, history volume and image for '$proj'."
-    Write-Host "  Shared volume 'claudebox-shared-config' is NOT removed (shared across projects)." -ForegroundColor DarkGray
+    Write-Host "  Shared volumes for profile '$Profile' are NOT removed." -ForegroundColor DarkGray
+    Write-Host "  To remove: docker volume rm claudebox-shared-config-$(Get-VolumeSuffix $Profile) claudebox-shared-ccstatusline-$(Get-VolumeSuffix $Profile)" -ForegroundColor DarkGray
     if (-not (Confirm-Step "Continue? [y/N]")) { Write-Info "Cancelled."; return }
 
     if (Test-ContainerExists) {
@@ -757,7 +849,9 @@ function Show-Help {
     # Then from any project folder -- all in one command:
     cd C:\projects\my-project
     claudebox start
-    claudebox start -y     # skip all confirmations
+    claudebox start -y              # skip all confirmations
+    claudebox start -Profile work   # use work profile (~/.claude-work)
+    claudebox start -p work -y      # work profile, no prompts
 
     # Or step by step:
     claudebox init
