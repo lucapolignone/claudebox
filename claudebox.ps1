@@ -37,7 +37,11 @@ param(
 
     [Parameter()]
     [Alias('p')]
-    [string]$Profile = 'personal'
+    [string]$Profile = 'personal',
+
+    [Parameter()]
+    [Alias('n')]
+    [switch]$NoUpdate
 )
 
 Set-StrictMode -Version Latest
@@ -101,6 +105,48 @@ function Test-ContainerRunning {
     $name = Get-ContainerName
     $result = docker ps --format '{{.Names}}' 2>$null | Where-Object { $_ -eq $name }
     return [bool]$result
+}
+
+# --- Version pinning: rende la cache di Docker consapevole della versione di CC
+# Strategia: scarichiamo il Dockerfile ufficiale da Anthropic, poi sostituiamo
+# `@anthropic-ai/claude-code` con `@anthropic-ai/claude-code@<latest>` usando la
+# versione corrente dal registry npm. Risultato:
+#   - versione invariata -> file identico -> cache Docker hit -> build istantanea
+#   - versione nuova      -> riga RUN diversa -> cache invalidata da quel layer
+#     in poi, rebuild solo degli step che dipendono da CC (non da zero)
+function Get-LatestClaudeCodeVersion {
+    try {
+        $resp = Invoke-RestMethod `
+            -Uri 'https://registry.npmjs.org/@anthropic-ai/claude-code/latest' `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        if ($resp -and $resp.version) { return [string]$resp.version }
+    } catch { }
+    return $null
+}
+
+function Update-DockerfileClaudeVersion {
+    param(
+        [Parameter(Mandatory)][string]$DockerfilePath,
+        [Parameter(Mandatory)][string]$Version
+    )
+    if (-not (Test-Path -LiteralPath $DockerfilePath)) { return $false }
+    $content = [System.IO.File]::ReadAllText($DockerfilePath)
+    # Il Dockerfile ufficiale Anthropic usa `@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`
+    # (interpolazione ARG/ENV). La char class deve accettare anche $, {, } e qualsiasi
+    # altro carattere non-whitespace/non-shell-operator, altrimenti il gruppo opzionale
+    # fallisce e lasciamo la riga in uno stato rotto (doppio tag: @2.1.112@${VAR}).
+    $patched = [regex]::Replace(
+        $content,
+        '@anthropic-ai/claude-code(@[^\s;&|]*)?',
+        "@anthropic-ai/claude-code@$Version"
+    )
+    if ($patched -ne $content) {
+        # Preserva line endings LF (il file viene eseguito in Linux container)
+        $patched = $patched -replace "`r`n", "`n"
+        [System.IO.File]::WriteAllText($DockerfilePath, $patched)
+        return $true
+    }
+    return $false
 }
 
 # --- Percorso di installazione -------------------------------------------------
@@ -425,6 +471,28 @@ function Invoke-Up {
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
 
     Write-Header "=== Starting devcontainer '$proj' ==="
+
+    # -- Pin versione Claude Code nel Dockerfile (prima della build) ------------
+    # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
+    # una versione nuova. Se la versione e' la stessa, il file non cambia e
+    # la cache viene riutilizzata.
+    if (-not $NoUpdate) {
+        Write-Info "Checking latest Claude Code version on npm..."
+        $latestVer = Get-LatestClaudeCodeVersion
+        if ($latestVer) {
+            $dfPath = Join-Path $currentDir '.devcontainer\Dockerfile'
+            $changed = Update-DockerfileClaudeVersion -DockerfilePath $dfPath -Version $latestVer
+            if ($changed) {
+                Write-Ok "Dockerfile pinned to claude-code@$latestVer (image layer will rebuild)"
+            } else {
+                Write-Ok "Claude Code already pinned to $latestVer (Docker cache will be reused)"
+            }
+        } else {
+            Write-Warn "Could not reach npm registry. Building with Dockerfile as-is."
+        }
+    } else {
+        Write-Info "Skipping version pin (-NoUpdate). Building with Dockerfile as-is."
+    }
 
     # -- Build ------------------------------------------------------------------
     Write-Info "Building Docker image (may take a few minutes on first run)..."
@@ -859,6 +927,7 @@ function Show-Help {
     claudebox start -y              # skip all confirmations
     claudebox start -Profile work   # use work profile (~/.claude-work)
     claudebox start -p work -y      # work profile, no prompts
+    claudebox start -NoUpdate       # keep Claude Code version from image (no npm update)
 
     # Or step by step:
     claudebox init

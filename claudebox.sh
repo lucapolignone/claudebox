@@ -19,11 +19,14 @@
 set -euo pipefail
 
 # -y / --yes flag: skip all confirmation prompts
+# --no-update / -n flag: skip automatic Claude Code update on container start
 AUTO_YES=false
+NO_UPDATE=false
 PROFILE='personal'
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=true ;;
+        -n|--no-update) NO_UPDATE=true ;;
         -p|--profile) : ;; # handled below with shift
     esac
 done
@@ -113,6 +116,44 @@ container_exists() {
 
 container_running() {
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$(container_name)"
+}
+
+# ── Version pinning ─────────────────────────────────────────────────────────────
+# Rende la cache di Docker consapevole della versione di claude-code.
+# Scarichiamo il Dockerfile ufficiale da Anthropic e poi sostituiamo
+# `@anthropic-ai/claude-code` con `@anthropic-ai/claude-code@<latest>`:
+#   - versione invariata -> file identico -> cache Docker hit -> build istantanea
+#   - versione nuova      -> riga RUN diversa -> cache invalidata da quel layer
+#     in poi, rebuild solo degli step che dipendono da CC (non da zero)
+get_latest_cc_version() {
+    local url='https://registry.npmjs.org/@anthropic-ai/claude-code/latest'
+    local json=''
+    if command -v curl >/dev/null 2>&1; then
+        json=$(curl -fsSL --max-time 10 "$url" 2>/dev/null) || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        json=$(wget -qO- --timeout=10 "$url" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+    # Estrai il campo "version" senza dipendere da jq/python (portabile)
+    printf '%s' "$json" \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | head -1 \
+        | awk -F'"' '{print $(NF-1)}'
+}
+
+pin_dockerfile_cc_version() {
+    local dockerfile="$1" version="$2"
+    [ -f "$dockerfile" ] || return 1
+    # Il Dockerfile ufficiale Anthropic usa `@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`.
+    # La char class deve accettare $, {, } (interpolazione ARG/ENV) altrimenti
+    # lasciamo la riga rotta: "@2.1.112@${CLAUDE_CODE_VERSION}" -> npm error EINVALIDTAGNAME.
+    # Escludiamo solo whitespace e shell operators come terminatori del pin.
+    # Delimitatore sed: # (evita conflitto con | dentro la char class).
+    local tmp; tmp=$(mktemp)
+    sed -E "s#@anthropic-ai/claude-code(@[^[:space:];&|]*)?#@anthropic-ai/claude-code@${version}#g" \
+        "$dockerfile" > "$tmp" && mv "$tmp" "$dockerfile"
+    return 0
 }
 
 # ── URL base file ufficiali Anthropic ───────────────────────────────────────────
@@ -335,6 +376,26 @@ cmd_up() {
     cname="$(container_name)"
 
     header "=== Starting devcontainer '$proj' ==="
+
+    # Pin versione Claude Code nel Dockerfile (prima della build)
+    # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
+    # una versione nuova. Se la versione e' la stessa, il file non cambia e
+    # la cache viene riutilizzata.
+    if [ "$NO_UPDATE" != "true" ]; then
+        info "Checking latest Claude Code version on npm..."
+        latest_ver=$(get_latest_cc_version || true)
+        if [ -n "$latest_ver" ]; then
+            if pin_dockerfile_cc_version ".devcontainer/Dockerfile" "$latest_ver"; then
+                ok "Dockerfile pinned to claude-code@$latest_ver (Docker will rebuild the affected layer only if version changed)"
+            else
+                warn "Dockerfile not found or not writable. Building with it as-is."
+            fi
+        else
+            warn "Could not reach npm registry. Building with Dockerfile as-is."
+        fi
+    else
+        info "Skipping version pin (--no-update). Building with Dockerfile as-is."
+    fi
 
     # Build
     info "Building Docker image (may take a few minutes on first run)..."
@@ -742,6 +803,7 @@ cmd_help() {
     claudebox start -y                    # skip all confirmations
     claudebox start -p work               # use work profile (~/.claude-work)
     claudebox start -p work -y            # work profile, no prompts
+    claudebox start --no-update           # keep Claude Code version from image
 
     # Or step by step:
     claudebox init
