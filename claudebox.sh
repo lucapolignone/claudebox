@@ -173,6 +173,60 @@ download_file() {
     ok "$label scaricato da GitHub ufficiale"
 }
 
+# ── Dockerfile patches: discovery + execution ──────────────────────────────────
+# Cerca file che matchano 'patch-dockerfile*.sh' in DUE posizioni:
+#   1. .devcontainer/    -> eseguiti con cwd=.devcontainer/
+#                           (convenzione: patch usa DOCKERFILE="Dockerfile")
+#   2. project root      -> eseguiti con cwd=project root
+#                           (convenzione: patch usa DOCKERFILE=".devcontainer/Dockerfile")
+# Questo permette a patch scritti con entrambe le convenzioni di funzionare
+# senza modifiche. Il glob 'patch-dockerfile*.sh' cattura sia
+# 'patch-dockerfile.sh' che 'patch-dockerfile-java.sh', etc.
+# Pensato per essere chiamato dopo ogni 'init'/'update' (che riscaricano il
+# Dockerfile ufficiale e cancellerebbero eventuali modifiche custom) e anche
+# come safety net all'inizio di 'up'. I patch DEVONO essere idempotenti.
+apply_dockerfile_patches() {
+    local project_root="$1"
+    local dc_dir="$project_root/.devcontainer"
+    local found=0 patch name rel
+
+    _run_patch_in() {
+        local dir="$1" pfile="$2"
+        [ -f "$pfile" ] || return 0
+        if [ $found -eq 0 ]; then
+            header "=== Applying Dockerfile patches ==="
+            found=1
+        fi
+        name=$(basename "$pfile")
+        # Path relativo rispetto alla project root, solo per il log
+        rel="${pfile#$project_root/}"
+        info "Running: $rel"
+        chmod +x "$pfile" 2>/dev/null || true
+        # Eseguiamo il patch in una subshell cosi' 'set -e' del main non aborta
+        # se il patch restituisce non-zero.
+        if ( cd "$dir" && bash "$name" patch ); then
+            ok "$name applicato"
+        else
+            warn "$name ha restituito errore (exit non-zero)"
+        fi
+    }
+
+    # 1. Patches in .devcontainer/
+    if [ -d "$dc_dir" ]; then
+        for patch in "$dc_dir"/patch-dockerfile*.sh; do
+            _run_patch_in "$dc_dir" "$patch"
+        done
+    fi
+
+    # 2. Patches in project root
+    for patch in "$project_root"/patch-dockerfile*.sh; do
+        _run_patch_in "$project_root" "$patch"
+    done
+
+    [ $found -eq 1 ] && echo ""
+    return 0
+}
+
 # ── AUTO-INSTALLAZIONE ──────────────────────────────────────────────────────────
 cmd_install() {
     header "=== Installing claudebox ==="
@@ -361,6 +415,10 @@ EOF
     ok "Generated .devcontainer/devcontainer.json (customized)"
     ok "Downloaded .devcontainer/Dockerfile (official Anthropic)"
     ok "Downloaded .devcontainer/init-firewall.sh (official Anthropic)"
+
+    # Applica eventuali patch custom presenti in .devcontainer/ o in project root
+    apply_dockerfile_patches "$(pwd)"
+
     echo ""
     info "Next step: claudebox up"
 }
@@ -376,6 +434,11 @@ cmd_up() {
     cname="$(container_name)"
 
     header "=== Starting devcontainer '$proj' ==="
+
+    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
+    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
+    # non fanno nulla.
+    apply_dockerfile_patches "$(pwd)"
 
     # Pin versione Claude Code nel Dockerfile (prima della build)
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -601,6 +664,9 @@ cmd_update() {
     download_file "$ANTHROPIC_RAW_BASE/Dockerfile"       "$dc_dir/Dockerfile"       "Dockerfile"
     download_file "$ANTHROPIC_RAW_BASE/init-firewall.sh" "$dc_dir/init-firewall.sh" "init-firewall.sh"
     chmod +x "$dc_dir/init-firewall.sh"
+
+    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
+    apply_dockerfile_patches "$(pwd)"
 
     echo ""
     ok "Official files updated. devcontainer.json unchanged."

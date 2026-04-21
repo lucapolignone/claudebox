@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     claudebox -- isolated Claude Code devcontainer for the current project folder (self-installing)
@@ -347,6 +347,62 @@ function Invoke-Download {
     }
 }
 
+# --- Dockerfile patches: discovery + execution -------------------------------
+# Cerca file che matchano 'patch-dockerfile*.ps1' in DUE posizioni:
+#   1. .devcontainer\    -> eseguiti con cwd=.devcontainer\
+#                           (convenzione: patch usa $DOCKERFILE = 'Dockerfile')
+#   2. project root      -> eseguiti con cwd=project root
+#                           (convenzione: patch usa $DOCKERFILE = '.devcontainer\Dockerfile')
+# Il glob 'patch-dockerfile*.ps1' cattura sia 'patch-dockerfile.ps1' che
+# 'patch-dockerfile-java.ps1', etc. I patch DEVONO essere idempotenti.
+function Invoke-DockerfilePatches {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $dcDir = Join-Path $ProjectRoot '.devcontainer'
+    $script:dfpFound = $false
+
+    function _Run-PatchIn {
+        param([string]$Dir, [string]$PFile)
+        if (-not (Test-Path -LiteralPath $PFile -PathType Leaf)) { return }
+        if (-not $script:dfpFound) {
+            Write-Header "=== Applying Dockerfile patches ==="
+            $script:dfpFound = $true
+        }
+        $name = Split-Path -Leaf $PFile
+        $rel  = $PFile.Substring($ProjectRoot.Length).TrimStart('\', '/')
+        Write-Info "Running: $rel"
+        Push-Location $Dir
+        try {
+            & $PFile patch
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                Write-Warn "$name ha restituito exit code $LASTEXITCODE"
+            } else {
+                Write-Ok "$name applicato"
+            }
+        } catch {
+            Write-Warn "$name ha lanciato un'eccezione: $_"
+        } finally {
+            Pop-Location
+        }
+    }
+
+    # 1. Patches in .devcontainer\
+    if (Test-Path -LiteralPath $dcDir) {
+        Get-ChildItem -Path $dcDir -Filter 'patch-dockerfile*.ps1' -File `
+            -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+            _Run-PatchIn -Dir $dcDir -PFile $_.FullName
+        }
+    }
+
+    # 2. Patches in project root
+    Get-ChildItem -Path $ProjectRoot -Filter 'patch-dockerfile*.ps1' -File `
+        -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+        _Run-PatchIn -Dir $ProjectRoot -PFile $_.FullName
+    }
+
+    if ($script:dfpFound) { Write-Host "" }
+}
+
 function Invoke-Init {
     $proj  = Get-ProjectName
     $dcDir = Join-Path (Get-Location) ".devcontainer"
@@ -440,6 +496,10 @@ function Invoke-Init {
     Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
     Write-Host ""
+
+    # Applica eventuali patch custom presenti in .devcontainer/
+    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
+
     Write-Info "Next step: claudebox up"
 }
 
@@ -455,6 +515,11 @@ function Invoke-Up {
     $cname = Get-ContainerName
     # NOTA: evitiamo di sovrascrivere $PWD (variabile automatica di PowerShell)
     $currentDir = (Get-Location).Path
+
+    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
+    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
+    # non fanno nulla.
+    Invoke-DockerfilePatches -ProjectRoot $currentDir
 
     # Normalize path for Docker (convert backslash -> slash and C: -> /c)
     # Convert C:\foo\bar -> /c/foo/bar (scriptblock in -replace does not work in PS 5.x)
@@ -715,6 +780,9 @@ function Invoke-Update {
         -Url  "$ANTHROPIC_RAW_BASE/init-firewall.sh" `
         -Dest "$dcDir\init-firewall.sh" `
         -Label "init-firewall.sh"
+
+    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
+    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
     Write-Host ""
     Write-Ok "Official files updated. devcontainer.json unchanged."
