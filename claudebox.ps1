@@ -41,7 +41,10 @@ param(
 
     [Parameter()]
     [Alias('n')]
-    [switch]$NoUpdate
+    [switch]$NoUpdate,
+
+    [Parameter()]
+    [switch]$NoRtk
 )
 
 Set-StrictMode -Version Latest
@@ -147,6 +150,134 @@ function Update-DockerfileClaudeVersion {
         return $true
     }
     return $false
+}
+
+# --- rtk integration ----------------------------------------------------------
+# rtk (https://github.com/rtk-ai/rtk) e' un proxy CLI in Rust che riduce il
+# consumo di token degli LLM filtrando l'output di comandi comuni (git, ls, cat,
+# grep, test runner, ...). E' un binario singolo statico, distribuito come
+# release pre-compilate su GitHub.
+#
+# Strategia di integrazione (specchio di quella di Claude Code):
+#   1) Recuperiamo la versione "latest" da GitHub Releases
+#   2) Iniettiamo nel Dockerfile (scaricato da Anthropic) un blocco delimitato
+#      da marker, idempotente: se la versione non cambia il file resta
+#      byte-identico -> cache Docker hit; se cambia, solo gli ultimi layer si
+#      ricompilano (download + install rtk)
+#   3) L'architettura viene detectata in fase di RUN con `uname -m`, cosi' lo
+#      stesso Dockerfile funziona su host x86_64 e aarch64 (Apple Silicon)
+#   4) Dopo lo start del container, registriamo l'hook PreToolUse in
+#      ~/.claude/settings.json con `rtk init -g --auto-patch` (idempotente)
+$Script:RTK_MARKER_OPEN  = '# >>> claudebox: rtk-install (managed) <<<'
+$Script:RTK_MARKER_CLOSE = '# <<< claudebox: rtk-install (managed) >>>'
+
+function Get-LatestRtkVersion {
+    # GitHub Releases API. Endpoint pubblico: 60 req/h per IP non autenticato,
+    # ampiamente sufficiente per uno script CLI lanciato a mano.
+    try {
+        $resp = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/rtk-ai/rtk/releases/latest' `
+            -Headers @{ 'Accept' = 'application/vnd.github+json' } `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        if ($resp -and $resp.tag_name) {
+            # tag_name e' "vX.Y.Z" -> strippa la "v"
+            return [string]($resp.tag_name -replace '^v', '')
+        }
+    } catch { }
+    return $null
+}
+
+function Remove-DockerfileRtkBlock {
+    param([Parameter(Mandatory)][string]$DockerfilePath)
+    if (-not (Test-Path -LiteralPath $DockerfilePath)) { return }
+    # Splitting su newline gestisce sia LF che CRLF: -split "`r?`n"
+    $lines = [System.IO.File]::ReadAllText($DockerfilePath) -split "`r?`n"
+    $out = New-Object System.Collections.Generic.List[string]
+    $skip = $false
+    foreach ($line in $lines) {
+        if ($line -eq $Script:RTK_MARKER_OPEN)  { $skip = $true;  continue }
+        if ($skip -and $line -eq $Script:RTK_MARKER_CLOSE) { $skip = $false; continue }
+        if (-not $skip) { $out.Add($line) }
+    }
+    # Strippa trailing blank lines (necessario per idempotenza: senza questo,
+    # ogni remove+append accumula una blank line in piu' nel file).
+    while ($out.Count -gt 0 -and [string]::IsNullOrWhiteSpace($out[$out.Count - 1])) {
+        $out.RemoveAt($out.Count - 1)
+    }
+    # Riscrive con LF (il Dockerfile viene eseguito in Linux container) e
+    # newline finale singolo per convention POSIX text files.
+    $content = ($out -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($DockerfilePath, $content)
+}
+
+function Update-DockerfileRtkVersion {
+    param(
+        [Parameter(Mandatory)][string]$DockerfilePath,
+        [Parameter(Mandatory)][string]$Version
+    )
+    if (-not (Test-Path -LiteralPath $DockerfilePath)) { return $false }
+
+    # Snapshot per rilevare se il file cambia effettivamente -> ci dice se la
+    # cache Docker verra' invalidata o no
+    $before = [System.IO.File]::ReadAllText($DockerfilePath)
+
+    # Step 1: rimuovi blocco esistente (idempotenza, no accumulazione blank).
+    # Post-condizione: il file termina con esattamente un "`n" (newline finale,
+    # senza trailing blank lines).
+    Remove-DockerfileRtkBlock -DockerfilePath $DockerfilePath
+
+    # Step 2: costruisci e appendi il blocco aggiornato.
+    # Note implementative del blocco RUN:
+    #  - `USER root` ... `USER node`: il Dockerfile Anthropic termina con
+    #    `USER node`; ripristiniamo l'invariante alla fine del nostro blocco.
+    #  - `set -eux`: failure-fast e log delle righe eseguite (utile in CI build)
+    #  - rtk pubblica due target Linux: x86_64-unknown-linux-musl (statico) e
+    #    aarch64-unknown-linux-gnu (glibc, va bene su immagine Anthropic basata
+    #    su Debian/Ubuntu). Altri arch non supportati: fallisce esplicito.
+    #  - install -m 0755: copia atomica + permessi corretti, accessibile a node.
+    #  - `rtk --version` come ultimo step e' uno smoke test: se il binario non
+    #    esegue (libc mismatch, download corrotto, ...) la build fallisce subito.
+    # NOTE: usiamo here-string @' '@ (single-quoted, no PowerShell interpolation)
+    # cosi' i $ Bash restano $; iniettiamo placeholder e versione via Replace.
+    $template = @'
+###RTK_OPEN###
+# rtk (https://github.com/rtk-ai/rtk) v###RTK_VERSION### - LLM token reducer
+# Managed by claudebox: do not edit this block manually, rerun 'claudebox up'
+# to update or pass -NoRtk to skip rtk integration.
+USER root
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  rtk_target='x86_64-unknown-linux-musl' ;; \
+        aarch64) rtk_target='aarch64-unknown-linux-gnu' ;; \
+        *) echo "rtk: unsupported architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/v###RTK_VERSION###/rtk-${rtk_target}.tar.gz" \
+        -o /tmp/rtk.tar.gz; \
+    tar -xzf /tmp/rtk.tar.gz -C /tmp; \
+    install -m 0755 /tmp/rtk /usr/local/bin/rtk; \
+    rm -rf /tmp/rtk /tmp/rtk.tar.gz; \
+    /usr/local/bin/rtk --version
+USER node
+###RTK_CLOSE###
+'@
+    $block = $template
+    $block = $block.Replace('###RTK_OPEN###',    $Script:RTK_MARKER_OPEN)
+    $block = $block.Replace('###RTK_CLOSE###',   $Script:RTK_MARKER_CLOSE)
+    $block = $block.Replace('###RTK_VERSION###', $Version)
+    # Normalizza CRLF -> LF (PS legge here-string col line ending del sorgente,
+    # che su Windows e' CRLF; il Dockerfile gira in Linux container e vogliamo LF)
+    $block = $block -replace "`r`n", "`n"
+
+    # Append: il file post-Remove termina con "...USER node\n". Aggiungiamo
+    # una blank line di separazione + il blocco + newline finale.
+    # Risultato: "...USER node\n\n# >>> ...\n... \n# <<< ...\n"
+    $current = [System.IO.File]::ReadAllText($DockerfilePath)
+    $newContent = $current + "`n" + $block.TrimEnd("`n") + "`n"
+    [System.IO.File]::WriteAllText($DockerfilePath, $newContent)
+
+    $after = [System.IO.File]::ReadAllText($DockerfilePath)
+    return ($before -ne $after)
 }
 
 # --- Percorso di installazione -------------------------------------------------
@@ -347,62 +478,6 @@ function Invoke-Download {
     }
 }
 
-# --- Dockerfile patches: discovery + execution -------------------------------
-# Cerca file che matchano 'patch-dockerfile*.ps1' in DUE posizioni:
-#   1. .devcontainer\    -> eseguiti con cwd=.devcontainer\
-#                           (convenzione: patch usa $DOCKERFILE = 'Dockerfile')
-#   2. project root      -> eseguiti con cwd=project root
-#                           (convenzione: patch usa $DOCKERFILE = '.devcontainer\Dockerfile')
-# Il glob 'patch-dockerfile*.ps1' cattura sia 'patch-dockerfile.ps1' che
-# 'patch-dockerfile-java.ps1', etc. I patch DEVONO essere idempotenti.
-function Invoke-DockerfilePatches {
-    param([Parameter(Mandatory)][string]$ProjectRoot)
-
-    $dcDir = Join-Path $ProjectRoot '.devcontainer'
-    $script:dfpFound = $false
-
-    function _Run-PatchIn {
-        param([string]$Dir, [string]$PFile)
-        if (-not (Test-Path -LiteralPath $PFile -PathType Leaf)) { return }
-        if (-not $script:dfpFound) {
-            Write-Header "=== Applying Dockerfile patches ==="
-            $script:dfpFound = $true
-        }
-        $name = Split-Path -Leaf $PFile
-        $rel  = $PFile.Substring($ProjectRoot.Length).TrimStart('\', '/')
-        Write-Info "Running: $rel"
-        Push-Location $Dir
-        try {
-            & $PFile patch
-            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-                Write-Warn "$name ha restituito exit code $LASTEXITCODE"
-            } else {
-                Write-Ok "$name applicato"
-            }
-        } catch {
-            Write-Warn "$name ha lanciato un'eccezione: $_"
-        } finally {
-            Pop-Location
-        }
-    }
-
-    # 1. Patches in .devcontainer\
-    if (Test-Path -LiteralPath $dcDir) {
-        Get-ChildItem -Path $dcDir -Filter 'patch-dockerfile*.ps1' -File `
-            -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
-            _Run-PatchIn -Dir $dcDir -PFile $_.FullName
-        }
-    }
-
-    # 2. Patches in project root
-    Get-ChildItem -Path $ProjectRoot -Filter 'patch-dockerfile*.ps1' -File `
-        -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
-        _Run-PatchIn -Dir $ProjectRoot -PFile $_.FullName
-    }
-
-    if ($script:dfpFound) { Write-Host "" }
-}
-
 function Invoke-Init {
     $proj  = Get-ProjectName
     $dcDir = Join-Path (Get-Location) ".devcontainer"
@@ -496,10 +571,6 @@ function Invoke-Init {
     Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
     Write-Host ""
-
-    # Applica eventuali patch custom presenti in .devcontainer/
-    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
-
     Write-Info "Next step: claudebox up"
 }
 
@@ -515,11 +586,6 @@ function Invoke-Up {
     $cname = Get-ContainerName
     # NOTA: evitiamo di sovrascrivere $PWD (variabile automatica di PowerShell)
     $currentDir = (Get-Location).Path
-
-    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
-    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
-    # non fanno nulla.
-    Invoke-DockerfilePatches -ProjectRoot $currentDir
 
     # Normalize path for Docker (convert backslash -> slash and C: -> /c)
     # Convert C:\foo\bar -> /c/foo/bar (scriptblock in -replace does not work in PS 5.x)
@@ -557,6 +623,31 @@ function Invoke-Up {
         }
     } else {
         Write-Info "Skipping version pin (-NoUpdate). Building with Dockerfile as-is."
+    }
+
+    # -- Pin versione rtk nel Dockerfile (prima della build) --------------------
+    # Stessa filosofia di cache-friendly del blocco Claude Code: il blocco rtk
+    # e' delimitato da marker e viene riscritto solo se la versione su GitHub
+    # e' cambiata. Se l'utente passa -NoRtk, rimuoviamo il blocco (build senza
+    # rtk).
+    if (-not $NoRtk) {
+        Write-Info "Checking latest rtk version on GitHub..."
+        $rtkVer = Get-LatestRtkVersion
+        if ($rtkVer) {
+            $dfPath = Join-Path $currentDir '.devcontainer\Dockerfile'
+            $rtkChanged = Update-DockerfileRtkVersion -DockerfilePath $dfPath -Version $rtkVer
+            if ($rtkChanged) {
+                Write-Ok "Dockerfile pinned to rtk@$rtkVer (image layer will rebuild)"
+            } else {
+                Write-Ok "rtk already pinned to $rtkVer (Docker cache will be reused)"
+            }
+        } else {
+            Write-Warn "Could not reach GitHub releases for rtk. Building with Dockerfile as-is."
+        }
+    } else {
+        Write-Info "Skipping rtk integration (-NoRtk). Removing rtk block from Dockerfile if present."
+        $dfPath = Join-Path $currentDir '.devcontainer\Dockerfile'
+        Remove-DockerfileRtkBlock -DockerfilePath $dfPath
     }
 
     # -- Build ------------------------------------------------------------------
@@ -737,6 +828,36 @@ for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
         Write-Warn "Firewall not applied (NET_ADMIN may not be available)."
     }
 
+    # -- Configure rtk hook in Claude Code settings (idempotent) ----------------
+    # `rtk init -g --auto-patch` registra l'hook PreToolUse in
+    # ~/.claude/settings.json e crea ~/.claude/RTK.md. E' idempotente: se
+    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se rtk e'
+    # effettivamente installato nell'immagine (cioe' -NoRtk non e' attivo).
+    # Eseguita come node (l'utente del container) cosi' i file restano di
+    # node:node nel volume condiviso /home/node/.claude.
+    if (-not $NoRtk) {
+        $rtkAvailable = $false
+        try {
+            docker exec $cname sh -c 'command -v rtk' 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $rtkAvailable = $true }
+        } catch { }
+
+        if ($rtkAvailable) {
+            Write-Info "Configuring rtk hook in Claude Code settings (idempotent)..."
+            try {
+                docker exec -u node $cname rtk init -g --auto-patch 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    $rtkVersionLine = (docker exec $cname rtk --version 2>$null | Select-Object -First 1)
+                    Write-Ok "rtk hook ready ($rtkVersionLine)"
+                } else {
+                    Write-Warn "rtk init failed; commands will not be auto-rewritten. Retry inside the container with: rtk init -g --auto-patch"
+                }
+            } catch {
+                Write-Warn "rtk init raised an error: $_"
+            }
+        }
+    }
+
     # -- Verifica isolamento ----------------------------------------------------
     Write-Header "=== Container isolation check ==="
     $workdir = docker exec -u node $cname pwd
@@ -780,9 +901,6 @@ function Invoke-Update {
         -Url  "$ANTHROPIC_RAW_BASE/init-firewall.sh" `
         -Dest "$dcDir\init-firewall.sh" `
         -Label "init-firewall.sh"
-
-    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
-    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
     Write-Host ""
     Write-Ok "Official files updated. devcontainer.json unchanged."
@@ -849,6 +967,12 @@ function Invoke-Start {
         Write-Host $env:CCSTATUSLINE_CONFIG_DIR -ForegroundColor White
     } else {
         Write-Host "(not found, will be skipped)" -ForegroundColor DarkGray
+    }
+    Write-Host "  rtk      : " -NoNewline -ForegroundColor DarkGray
+    if ($NoRtk) {
+        Write-Host "disabled (-NoRtk)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "auto-install + auto-update on each up" -ForegroundColor White
     }
 
     # -- Current state ----------------------------------------------------------
@@ -985,6 +1109,14 @@ function Show-Help {
     CLAUDE_CONFIG_DIR   Claude Code config directory
                         (default: ~\.claude if it exists)
 
+  INTEGRATIONS
+    rtk (https://github.com/rtk-ai/rtk) is auto-installed in every container
+    and kept up-to-date on each 'up' / 'start'. The PreToolUse hook is
+    registered in ~/.claude/settings.json so that bash commands like
+    'git status', 'cargo test', 'cat file.rs' are transparently rewritten
+    to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for 60-90%
+    token savings. Pass -NoRtk to disable rtk integration.
+
   FIRST RUN
     # Download and install (one-time):
     .\claudebox.ps1
@@ -996,6 +1128,7 @@ function Show-Help {
     claudebox start -Profile work   # use work profile (~/.claude-work)
     claudebox start -p work -y      # work profile, no prompts
     claudebox start -NoUpdate       # keep Claude Code version from image (no npm update)
+    claudebox start -NoRtk          # skip rtk install/update
 
     # Or step by step:
     claudebox init

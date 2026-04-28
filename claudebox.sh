@@ -20,13 +20,16 @@ set -euo pipefail
 
 # -y / --yes flag: skip all confirmation prompts
 # --no-update / -n flag: skip automatic Claude Code update on container start
+# --no-rtk flag: skip automatic rtk install/update on container start
 AUTO_YES=false
 NO_UPDATE=false
+NO_RTK=false
 PROFILE='personal'
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=true ;;
         -n|--no-update) NO_UPDATE=true ;;
+        --no-rtk) NO_RTK=true ;;
         -p|--profile) : ;; # handled below with shift
     esac
 done
@@ -156,6 +159,124 @@ pin_dockerfile_cc_version() {
     return 0
 }
 
+# ── rtk integration ────────────────────────────────────────────────────────────
+# rtk (https://github.com/rtk-ai/rtk) e' un proxy CLI in Rust che riduce il
+# consumo di token degli LLM filtrando l'output di comandi comuni (git, ls, cat,
+# grep, test runner, ...). E' un binario singolo statico, distribuito come
+# release pre-compilate su GitHub.
+#
+# Strategia di integrazione (specchio di quella di Claude Code):
+#   1) Recuperiamo la versione "latest" da GitHub Releases
+#   2) Iniettiamo nel Dockerfile (scaricato da Anthropic) un blocco delimitato
+#      da marker, idempotente: se la versione non cambia il file resta
+#      identico -> cache Docker hit; se cambia, solo gli ultimi layer si
+#      ricompilano (download + install rtk)
+#   3) L'architettura viene detectata in fase di RUN con `uname -m`, cosi' lo
+#      stesso Dockerfile funziona su host x86_64 (Intel) e aarch64 (Apple Silicon)
+#   4) Dopo lo start del container, registriamo l'hook PreToolUse in
+#      ~/.claude/settings.json con `rtk init -g --auto-patch` (idempotente)
+#
+# Marker univoci: usiamo stringhe lunghe e specifiche per evitare di matchare
+# accidentalmente commenti del Dockerfile ufficiale.
+RTK_MARKER_OPEN='# >>> claudebox: rtk-install (managed) <<<'
+RTK_MARKER_CLOSE='# <<< claudebox: rtk-install (managed) >>>'
+
+get_latest_rtk_version() {
+    # Endpoint pubblico, no auth. Limit GitHub: 60 req/h per IP non autenticato,
+    # ampiamente sufficiente per uno script CLI.
+    local url='https://api.github.com/repos/rtk-ai/rtk/releases/latest'
+    local json=''
+    if command -v curl >/dev/null 2>&1; then
+        json=$(curl -fsSL --max-time 10 \
+            -H 'Accept: application/vnd.github+json' \
+            "$url" 2>/dev/null) || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        json=$(wget -qO- --timeout=10 \
+            --header='Accept: application/vnd.github+json' \
+            "$url" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+    # Estrai "tag_name": "vX.Y.Z" e strippa la "v" iniziale
+    printf '%s' "$json" \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | head -1 \
+        | awk -F'"' '{print $(NF-1)}' \
+        | sed 's/^v//'
+}
+
+# Rimuove il blocco rtk dal Dockerfile (se presente). Usato sia per pulire prima
+# di reinserire il blocco aggiornato, sia quando l'utente passa --no-rtk e
+# vogliamo evitare di buildare con rtk dentro.
+remove_dockerfile_rtk_block() {
+    local dockerfile="$1"
+    [ -f "$dockerfile" ] || return 0
+    # Due pass:
+    #  1) awk: salta tutte le righe da OPEN a CLOSE (inclusive)
+    #  2) awk: strippa eventuali trailing blank lines del file
+    # La pulizia delle blank trailing e' indispensabile per l'idempotenza:
+    # senza di essa, ogni remove+append accumulerebbe una blank line in piu',
+    # cambiando il contenuto del Dockerfile -> cache miss anche con stessa
+    # versione di rtk.
+    # NOTE: non usiamo `-v close=...` perche' `close` e' una keyword built-in di
+    # gawk (chiude file/pipe) e provoca "cannot command line assign to close".
+    local tmp; tmp=$(mktemp)
+    awk -v mopen="$RTK_MARKER_OPEN" -v mclose="$RTK_MARKER_CLOSE" '
+        $0 == mopen { skip=1; next }
+        skip && $0 == mclose { skip=0; next }
+        !skip { print }
+    ' "$dockerfile" \
+    | awk '
+        /[^[:space:]]/ { last=NR }
+        { lines[NR]=$0 }
+        END { for (i=1; i<=last; i++) print lines[i] }
+    ' > "$tmp" && mv "$tmp" "$dockerfile"
+}
+
+pin_dockerfile_rtk_version() {
+    local dockerfile="$1" version="$2"
+    [ -f "$dockerfile" ] || return 1
+
+    # Step 1: rimuovi blocco esistente (idempotenza)
+    remove_dockerfile_rtk_block "$dockerfile"
+
+    # Step 2: appendi blocco aggiornato.
+    # Note implementative del blocco RUN:
+    #  - `USER root` ... `USER node`: il Dockerfile Anthropic termina con
+    #    `USER node`; ripristiniamo l'invariante alla fine del nostro blocco.
+    #  - `set -eux`: failure-fast e log delle riga eseguite (utile in build CI)
+    #  - rtk pubblica due target Linux: x86_64-unknown-linux-musl (statico) e
+    #    aarch64-unknown-linux-gnu (glibc, va bene su immagine Anthropic basata
+    #    su Debian/Ubuntu). Gli altri arch non sono supportati: fallisce esplicito.
+    #  - install -m 0755: copia atomica + permessi corretti, accessibile a node.
+    #  - `rtk --version` come ultimo step e' uno smoke test: se il binario non
+    #    esegue (libc mismatch, download corrotto, ...) la build fallisce subito.
+    cat >> "$dockerfile" <<EOF
+
+${RTK_MARKER_OPEN}
+# rtk (https://github.com/rtk-ai/rtk) v${version} - LLM token reducer
+# Managed by claudebox: do not edit this block manually, rerun 'claudebox up'
+# to update or pass --no-rtk to skip rtk integration.
+USER root
+RUN set -eux; \\
+    arch="\$(uname -m)"; \\
+    case "\$arch" in \\
+        x86_64)  rtk_target='x86_64-unknown-linux-musl' ;; \\
+        aarch64) rtk_target='aarch64-unknown-linux-gnu' ;; \\
+        *) echo "rtk: unsupported architecture '\$arch'" >&2; exit 1 ;; \\
+    esac; \\
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/v${version}/rtk-\${rtk_target}.tar.gz" \\
+        -o /tmp/rtk.tar.gz; \\
+    tar -xzf /tmp/rtk.tar.gz -C /tmp; \\
+    install -m 0755 /tmp/rtk /usr/local/bin/rtk; \\
+    rm -rf /tmp/rtk /tmp/rtk.tar.gz; \\
+    /usr/local/bin/rtk --version
+USER node
+${RTK_MARKER_CLOSE}
+EOF
+    return 0
+}
+
 # ── URL base file ufficiali Anthropic ───────────────────────────────────────────
 ANTHROPIC_RAW_BASE='https://raw.githubusercontent.com/anthropics/claude-code/main/.devcontainer'
 
@@ -171,60 +292,6 @@ download_file() {
         err "curl or wget not found. Please install one and try again."
     fi
     ok "$label scaricato da GitHub ufficiale"
-}
-
-# ── Dockerfile patches: discovery + execution ──────────────────────────────────
-# Cerca file che matchano 'patch-dockerfile*.sh' in DUE posizioni:
-#   1. .devcontainer/    -> eseguiti con cwd=.devcontainer/
-#                           (convenzione: patch usa DOCKERFILE="Dockerfile")
-#   2. project root      -> eseguiti con cwd=project root
-#                           (convenzione: patch usa DOCKERFILE=".devcontainer/Dockerfile")
-# Questo permette a patch scritti con entrambe le convenzioni di funzionare
-# senza modifiche. Il glob 'patch-dockerfile*.sh' cattura sia
-# 'patch-dockerfile.sh' che 'patch-dockerfile-java.sh', etc.
-# Pensato per essere chiamato dopo ogni 'init'/'update' (che riscaricano il
-# Dockerfile ufficiale e cancellerebbero eventuali modifiche custom) e anche
-# come safety net all'inizio di 'up'. I patch DEVONO essere idempotenti.
-apply_dockerfile_patches() {
-    local project_root="$1"
-    local dc_dir="$project_root/.devcontainer"
-    local found=0 patch name rel
-
-    _run_patch_in() {
-        local dir="$1" pfile="$2"
-        [ -f "$pfile" ] || return 0
-        if [ $found -eq 0 ]; then
-            header "=== Applying Dockerfile patches ==="
-            found=1
-        fi
-        name=$(basename "$pfile")
-        # Path relativo rispetto alla project root, solo per il log
-        rel="${pfile#$project_root/}"
-        info "Running: $rel"
-        chmod +x "$pfile" 2>/dev/null || true
-        # Eseguiamo il patch in una subshell cosi' 'set -e' del main non aborta
-        # se il patch restituisce non-zero.
-        if ( cd "$dir" && bash "$name" patch ); then
-            ok "$name applicato"
-        else
-            warn "$name ha restituito errore (exit non-zero)"
-        fi
-    }
-
-    # 1. Patches in .devcontainer/
-    if [ -d "$dc_dir" ]; then
-        for patch in "$dc_dir"/patch-dockerfile*.sh; do
-            _run_patch_in "$dc_dir" "$patch"
-        done
-    fi
-
-    # 2. Patches in project root
-    for patch in "$project_root"/patch-dockerfile*.sh; do
-        _run_patch_in "$project_root" "$patch"
-    done
-
-    [ $found -eq 1 ] && echo ""
-    return 0
 }
 
 # ── AUTO-INSTALLAZIONE ──────────────────────────────────────────────────────────
@@ -415,10 +482,6 @@ EOF
     ok "Generated .devcontainer/devcontainer.json (customized)"
     ok "Downloaded .devcontainer/Dockerfile (official Anthropic)"
     ok "Downloaded .devcontainer/init-firewall.sh (official Anthropic)"
-
-    # Applica eventuali patch custom presenti in .devcontainer/ o in project root
-    apply_dockerfile_patches "$(pwd)"
-
     echo ""
     info "Next step: claudebox up"
 }
@@ -434,11 +497,6 @@ cmd_up() {
     cname="$(container_name)"
 
     header "=== Starting devcontainer '$proj' ==="
-
-    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
-    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
-    # non fanno nulla.
-    apply_dockerfile_patches "$(pwd)"
 
     # Pin versione Claude Code nel Dockerfile (prima della build)
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -458,6 +516,27 @@ cmd_up() {
         fi
     else
         info "Skipping version pin (--no-update). Building with Dockerfile as-is."
+    fi
+
+    # Pin versione rtk nel Dockerfile. Stessa filosofia di cache-friendly del
+    # blocco Claude Code: il blocco rtk e' delimitato da marker e viene
+    # riscritto solo se la versione su GitHub e' cambiata. Se l'utente passa
+    # --no-rtk, rimuoviamo il blocco (build senza rtk).
+    if [ "$NO_RTK" != "true" ]; then
+        info "Checking latest rtk version on GitHub..."
+        rtk_ver=$(get_latest_rtk_version || true)
+        if [ -n "$rtk_ver" ]; then
+            if pin_dockerfile_rtk_version ".devcontainer/Dockerfile" "$rtk_ver"; then
+                ok "Dockerfile pinned to rtk@$rtk_ver (image layer rebuilds only if rtk version changed)"
+            else
+                warn "Dockerfile not found or not writable. Building without rtk integration."
+            fi
+        else
+            warn "Could not reach GitHub releases for rtk. Building with Dockerfile as-is."
+        fi
+    else
+        info "Skipping rtk integration (--no-rtk). Removing rtk block from Dockerfile if present."
+        remove_dockerfile_rtk_block ".devcontainer/Dockerfile"
     fi
 
     # Build
@@ -625,6 +704,22 @@ for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
 JSEOF
     docker exec -u node "$cname" node /tmp/claudebox-fix-paths.js 2>/dev/null || true
 
+    # Configure rtk hook in Claude Code settings (idempotent).
+    # `rtk init -g --auto-patch` registra l'hook PreToolUse in
+    # ~/.claude/settings.json e crea ~/.claude/RTK.md. E' idempotente: se
+    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se rtk e'
+    # effettivamente installato nell'immagine (cioe' --no-rtk non e' attivo).
+    # Eseguita come node (l'utente del container) cosi' i file restano di
+    # node:node nel volume condiviso /home/node/.claude.
+    if [ "$NO_RTK" != "true" ] && docker exec "$cname" command -v rtk >/dev/null 2>&1; then
+        info "Configuring rtk hook in Claude Code settings (idempotent)..."
+        if docker exec -u node "$cname" rtk init -g --auto-patch >/dev/null 2>&1; then
+            ok "rtk hook ready ($(docker exec "$cname" rtk --version 2>/dev/null | head -1))"
+        else
+            warn "rtk init failed; commands will not be auto-rewritten. You can retry inside the container with: rtk init -g --auto-patch"
+        fi
+    fi
+
     # Verify isolation
     header "=== Container isolation check ==="
     local workdir
@@ -664,9 +759,6 @@ cmd_update() {
     download_file "$ANTHROPIC_RAW_BASE/Dockerfile"       "$dc_dir/Dockerfile"       "Dockerfile"
     download_file "$ANTHROPIC_RAW_BASE/init-firewall.sh" "$dc_dir/init-firewall.sh" "init-firewall.sh"
     chmod +x "$dc_dir/init-firewall.sh"
-
-    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
-    apply_dockerfile_patches "$(pwd)"
 
     echo ""
     ok "Official files updated. devcontainer.json unchanged."
@@ -734,6 +826,12 @@ cmd_start() {
         echo "$CCSTATUSLINE_CONFIG_DIR"
     else
         echo "(not found, will be skipped)"
+    fi
+    echo -n "  rtk      : "
+    if $NO_RTK; then
+        echo "disabled (--no-rtk)"
+    else
+        echo "auto-install + auto-update on each up"
     fi
 
     local has_devcontainer=false do_update=false
@@ -859,6 +957,14 @@ cmd_help() {
     CLAUDE_CONFIG_DIR         Claude Code config directory (default: ~/.claude)
     CCSTATUSLINE_CONFIG_DIR   ccstatusline config directory (default: ~/.config/ccstatusline)
 
+  INTEGRATIONS
+    rtk (https://github.com/rtk-ai/rtk) is auto-installed in every container
+    and kept up-to-date on each 'up' / 'start'. The PreToolUse hook is
+    registered in ~/.claude/settings.json so that bash commands like
+    'git status', 'cargo test', 'cat file.rs' are transparently rewritten
+    to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for 60-90%
+    token savings. Pass --no-rtk to disable rtk integration.
+
   FIRST RUN
     # Download and install (one-time):
     bash claudebox.sh install
@@ -870,6 +976,7 @@ cmd_help() {
     claudebox start -p work               # use work profile (~/.claude-work)
     claudebox start -p work -y            # work profile, no prompts
     claudebox start --no-update           # keep Claude Code version from image
+    claudebox start --no-rtk              # skip rtk install/update
 
     # Or step by step:
     claudebox init
