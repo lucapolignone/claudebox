@@ -115,6 +115,40 @@ MAVEN_VERSION=3.9.6 ./patch-dockerfile-java.sh patch
 
 Comandi: `patch` (default), `remove`, `status`, `help`.
 
+### `patch-dockerfile-uvx.sh` — uv + uvx (Python tooling)
+
+Aggiunge [uv](https://docs.astral.sh/uv/) e `uvx` (alias di `uv tool run`) di Astral. Patch riusabile, scopribile da entrambe le location.
+
+Installa:
+
+- **`uv`** — Python package manager moderno (gestisce venv, lockfile, project, `pip` interface, install di interpreti Python)
+- **`uvx`** — esegue tool Python in environment effimero senza installarli globalmente. Es:
+  ```bash
+  uvx ruff check .     # ruff senza installarlo
+  uvx black .          # black senza installarlo
+  uvx pytest           # pytest senza installarlo
+  ```
+
+Il patch usa il metodo raccomandato dalla [documentazione ufficiale](https://docs.astral.sh/uv/guides/integration/docker/): `COPY --from=ghcr.io/astral-sh/uv:<version> /uv /uvx /usr/local/bin/`. Vantaggi vs `curl ... | sh`:
+
+- Build più veloce (no script di installazione)
+- Pinning di versione esplicito e riproducibile
+- Binari statici musl, niente dipendenze runtime
+- Niente layer apt aggiuntivi
+
+Variabili d'ambiente settate dal patch:
+
+- `UV_TOOL_BIN_DIR=/usr/local/bin` — `uv tool install <pkg>` mette i binari direttamente nel `PATH`
+- `UV_LINK_MODE=copy` — silenzia warning sui link cross-filesystem nei volumi devcontainer
+
+Override versione:
+
+```bash
+UV_VERSION=0.11.8 ./patch-dockerfile-uvx.sh patch
+```
+
+Comandi: `patch` (default), `remove`, `status`, `help`.
+
 ### `patch-dockerfile.sh` — PHP 8 + Composer + rete `yougo-dev`
 
 Patch **project-specific per yougo-dev**. Vive in project root (usa `DOCKERFILE=".devcontainer/Dockerfile"`). Installa:
@@ -324,6 +358,8 @@ Stai lanciando claudebox dall'interno della cartella `.devcontainer/`. Il nome d
 ├── patch-dockerfile.ps1                <- idem per Windows
 ├── patch-dockerfile-java.sh            <- patch riusabile (Java 21 + Maven)
 ├── patch-dockerfile-java.ps1           <- idem per Windows
+├── patch-dockerfile-uvx.sh             <- patch riusabile (uv + uvx)
+├── patch-dockerfile-uvx.ps1            <- idem per Windows
 └── .devcontainer/                      <- generato da claudebox init (gitignora o committa)
     ├── Dockerfile                      <- scaricato da Anthropic + patch appesi
     ├── Dockerfile.orig                 <- backup pre-patch (creato al primo run)
