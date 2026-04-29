@@ -20,16 +20,16 @@ set -euo pipefail
 
 # -y / --yes flag: skip all confirmation prompts
 # --no-update / -n flag: skip automatic Claude Code update on container start
-# --no-rtk flag: skip automatic rtk install/update on container start
+# --use-rtk flag: opt-in to rtk install/update on container start (off by default)
 AUTO_YES=false
 NO_UPDATE=false
-NO_RTK=false
+USE_RTK=false
 PROFILE='personal'
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=true ;;
         -n|--no-update) NO_UPDATE=true ;;
-        --no-rtk) NO_RTK=true ;;
+        --use-rtk) USE_RTK=true ;;
         -p|--profile) : ;; # handled below with shift
     esac
 done
@@ -206,8 +206,8 @@ get_latest_rtk_version() {
 }
 
 # Rimuove il blocco rtk dal Dockerfile (se presente). Usato sia per pulire prima
-# di reinserire il blocco aggiornato, sia quando l'utente passa --no-rtk e
-# vogliamo evitare di buildare con rtk dentro.
+# di reinserire il blocco aggiornato (con --use-rtk), sia come comportamento di
+# default (rtk off) per garantire che il Dockerfile resti pulito.
 remove_dockerfile_rtk_block() {
     local dockerfile="$1"
     [ -f "$dockerfile" ] || return 0
@@ -255,8 +255,8 @@ pin_dockerfile_rtk_version() {
 
 ${RTK_MARKER_OPEN}
 # rtk (https://github.com/rtk-ai/rtk) v${version} - LLM token reducer
-# Managed by claudebox: do not edit this block manually, rerun 'claudebox up'
-# to update or pass --no-rtk to skip rtk integration.
+# Managed by claudebox: do not edit this block manually. Rerun 'claudebox up'
+# (with --use-rtk) to update, or omit --use-rtk to remove rtk integration.
 USER root
 RUN set -eux; \\
     arch="\$(uname -m)"; \\
@@ -518,11 +518,11 @@ cmd_up() {
         info "Skipping version pin (--no-update). Building with Dockerfile as-is."
     fi
 
-    # Pin versione rtk nel Dockerfile. Stessa filosofia di cache-friendly del
-    # blocco Claude Code: il blocco rtk e' delimitato da marker e viene
-    # riscritto solo se la versione su GitHub e' cambiata. Se l'utente passa
-    # --no-rtk, rimuoviamo il blocco (build senza rtk).
-    if [ "$NO_RTK" != "true" ]; then
+    # Pin versione rtk nel Dockerfile (solo se l'utente passa --use-rtk).
+    # Stessa filosofia di cache-friendly del blocco Claude Code: il blocco rtk
+    # e' delimitato da marker e viene riscritto solo se la versione su GitHub
+    # e' cambiata. Default: rtk off, blocco rimosso dal Dockerfile (build pulita).
+    if [ "$USE_RTK" = "true" ]; then
         info "Checking latest rtk version on GitHub..."
         rtk_ver=$(get_latest_rtk_version || true)
         if [ -n "$rtk_ver" ]; then
@@ -535,7 +535,7 @@ cmd_up() {
             warn "Could not reach GitHub releases for rtk. Building with Dockerfile as-is."
         fi
     else
-        info "Skipping rtk integration (--no-rtk). Removing rtk block from Dockerfile if present."
+        info "rtk integration disabled (default). Removing rtk block from Dockerfile if present."
         remove_dockerfile_rtk_block ".devcontainer/Dockerfile"
     fi
 
@@ -707,11 +707,11 @@ JSEOF
     # Configure rtk hook in Claude Code settings (idempotent).
     # `rtk init -g --auto-patch` registra l'hook PreToolUse in
     # ~/.claude/settings.json e crea ~/.claude/RTK.md. E' idempotente: se
-    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se rtk e'
-    # effettivamente installato nell'immagine (cioe' --no-rtk non e' attivo).
+    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se l'utente ha
+    # passato --use-rtk e rtk e' effettivamente installato nell'immagine.
     # Eseguita come node (l'utente del container) cosi' i file restano di
     # node:node nel volume condiviso /home/node/.claude.
-    if [ "$NO_RTK" != "true" ] && docker exec "$cname" command -v rtk >/dev/null 2>&1; then
+    if [ "$USE_RTK" = "true" ] && docker exec "$cname" command -v rtk >/dev/null 2>&1; then
         info "Configuring rtk hook in Claude Code settings (idempotent)..."
         if docker exec -u node "$cname" rtk init -g --auto-patch >/dev/null 2>&1; then
             ok "rtk hook ready ($(docker exec "$cname" rtk --version 2>/dev/null | head -1))"
@@ -828,10 +828,10 @@ cmd_start() {
         echo "(not found, will be skipped)"
     fi
     echo -n "  rtk      : "
-    if $NO_RTK; then
-        echo "disabled (--no-rtk)"
+    if $USE_RTK; then
+        echo "enabled (--use-rtk): auto-install + auto-update on each up"
     else
-        echo "auto-install + auto-update on each up"
+        echo "disabled (default)"
     fi
 
     local has_devcontainer=false do_update=false
@@ -958,12 +958,13 @@ cmd_help() {
     CCSTATUSLINE_CONFIG_DIR   ccstatusline config directory (default: ~/.config/ccstatusline)
 
   INTEGRATIONS
-    rtk (https://github.com/rtk-ai/rtk) is auto-installed in every container
-    and kept up-to-date on each 'up' / 'start'. The PreToolUse hook is
-    registered in ~/.claude/settings.json so that bash commands like
-    'git status', 'cargo test', 'cat file.rs' are transparently rewritten
-    to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for 60-90%
-    token savings. Pass --no-rtk to disable rtk integration.
+    rtk (https://github.com/rtk-ai/rtk) is supported as an opt-in integration
+    via --use-rtk. When enabled, rtk is installed in the container and the
+    PreToolUse hook is registered in ~/.claude/settings.json so that bash
+    commands like 'git status', 'cargo test', 'cat file.rs' are transparently
+    rewritten to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for
+    60-90% token savings. Default is OFF (rtk block removed from Dockerfile,
+    no hook registered) -- enable explicitly with --use-rtk.
 
   FIRST RUN
     # Download and install (one-time):
@@ -976,7 +977,7 @@ cmd_help() {
     claudebox start -p work               # use work profile (~/.claude-work)
     claudebox start -p work -y            # work profile, no prompts
     claudebox start --no-update           # keep Claude Code version from image
-    claudebox start --no-rtk              # skip rtk install/update
+    claudebox start --use-rtk             # opt-in to rtk install/update
 
     # Or step by step:
     claudebox init

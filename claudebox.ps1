@@ -44,7 +44,7 @@ param(
     [switch]$NoUpdate,
 
     [Parameter()]
-    [switch]$NoRtk
+    [switch]$UseRtk
 )
 
 Set-StrictMode -Version Latest
@@ -242,8 +242,8 @@ function Update-DockerfileRtkVersion {
     $template = @'
 ###RTK_OPEN###
 # rtk (https://github.com/rtk-ai/rtk) v###RTK_VERSION### - LLM token reducer
-# Managed by claudebox: do not edit this block manually, rerun 'claudebox up'
-# to update or pass -NoRtk to skip rtk integration.
+# Managed by claudebox: do not edit this block manually. Rerun 'claudebox up'
+# (with -UseRtk) to update, or omit -UseRtk to remove rtk integration.
 USER root
 RUN set -eux; \
     arch="$(uname -m)"; \
@@ -625,12 +625,11 @@ function Invoke-Up {
         Write-Info "Skipping version pin (-NoUpdate). Building with Dockerfile as-is."
     }
 
-    # -- Pin versione rtk nel Dockerfile (prima della build) --------------------
+    # -- Pin versione rtk nel Dockerfile (solo se l'utente passa -UseRtk) -------
     # Stessa filosofia di cache-friendly del blocco Claude Code: il blocco rtk
     # e' delimitato da marker e viene riscritto solo se la versione su GitHub
-    # e' cambiata. Se l'utente passa -NoRtk, rimuoviamo il blocco (build senza
-    # rtk).
-    if (-not $NoRtk) {
+    # e' cambiata. Default: rtk off, blocco rimosso dal Dockerfile (build pulita).
+    if ($UseRtk) {
         Write-Info "Checking latest rtk version on GitHub..."
         $rtkVer = Get-LatestRtkVersion
         if ($rtkVer) {
@@ -645,7 +644,7 @@ function Invoke-Up {
             Write-Warn "Could not reach GitHub releases for rtk. Building with Dockerfile as-is."
         }
     } else {
-        Write-Info "Skipping rtk integration (-NoRtk). Removing rtk block from Dockerfile if present."
+        Write-Info "rtk integration disabled (default). Removing rtk block from Dockerfile if present."
         $dfPath = Join-Path $currentDir '.devcontainer\Dockerfile'
         Remove-DockerfileRtkBlock -DockerfilePath $dfPath
     }
@@ -831,11 +830,11 @@ for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
     # -- Configure rtk hook in Claude Code settings (idempotent) ----------------
     # `rtk init -g --auto-patch` registra l'hook PreToolUse in
     # ~/.claude/settings.json e crea ~/.claude/RTK.md. E' idempotente: se
-    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se rtk e'
-    # effettivamente installato nell'immagine (cioe' -NoRtk non e' attivo).
+    # l'hook e' gia' presente, non fa nulla. La eseguiamo solo se l'utente ha
+    # passato -UseRtk e rtk e' effettivamente installato nell'immagine.
     # Eseguita come node (l'utente del container) cosi' i file restano di
     # node:node nel volume condiviso /home/node/.claude.
-    if (-not $NoRtk) {
+    if ($UseRtk) {
         $rtkAvailable = $false
         try {
             docker exec $cname sh -c 'command -v rtk' 2>$null | Out-Null
@@ -969,10 +968,10 @@ function Invoke-Start {
         Write-Host "(not found, will be skipped)" -ForegroundColor DarkGray
     }
     Write-Host "  rtk      : " -NoNewline -ForegroundColor DarkGray
-    if ($NoRtk) {
-        Write-Host "disabled (-NoRtk)" -ForegroundColor DarkGray
+    if ($UseRtk) {
+        Write-Host "enabled (-UseRtk): auto-install + auto-update on each up" -ForegroundColor White
     } else {
-        Write-Host "auto-install + auto-update on each up" -ForegroundColor White
+        Write-Host "disabled (default)" -ForegroundColor DarkGray
     }
 
     # -- Current state ----------------------------------------------------------
@@ -1110,12 +1109,13 @@ function Show-Help {
                         (default: ~\.claude if it exists)
 
   INTEGRATIONS
-    rtk (https://github.com/rtk-ai/rtk) is auto-installed in every container
-    and kept up-to-date on each 'up' / 'start'. The PreToolUse hook is
-    registered in ~/.claude/settings.json so that bash commands like
-    'git status', 'cargo test', 'cat file.rs' are transparently rewritten
-    to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for 60-90%
-    token savings. Pass -NoRtk to disable rtk integration.
+    rtk (https://github.com/rtk-ai/rtk) is supported as an opt-in integration
+    via -UseRtk. When enabled, rtk is installed in the container and the
+    PreToolUse hook is registered in ~/.claude/settings.json so that bash
+    commands like 'git status', 'cargo test', 'cat file.rs' are transparently
+    rewritten to 'rtk git status', 'rtk cargo test', 'rtk read file.rs' for
+    60-90% token savings. Default is OFF (rtk block removed from Dockerfile,
+    no hook registered) -- enable explicitly with -UseRtk.
 
   FIRST RUN
     # Download and install (one-time):
@@ -1128,7 +1128,11 @@ function Show-Help {
     claudebox start -Profile work   # use work profile (~/.claude-work)
     claudebox start -p work -y      # work profile, no prompts
     claudebox start -NoUpdate       # keep Claude Code version from image (no npm update)
-    claudebox start -NoRtk          # skip rtk install/update
+    claudebox start -UseRtk         # opt-in to rtk install/update
+
+    # Or step by step:
+    claudebox init
+    claudebox up
 
     # Or step by step:
     claudebox init
