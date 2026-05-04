@@ -156,6 +156,49 @@ pin_dockerfile_cc_version() {
     return 0
 }
 
+# ── DOCKERFILE PATCHES: discovery + execution ───────────────────────────────────
+# Cerca file che matchano 'patch-dockerfile*.sh' in DUE posizioni:
+#   1. .devcontainer/   -> eseguiti con cwd=.devcontainer/
+#                          (convenzione: patch usa DOCKERFILE="Dockerfile")
+#   2. project root     -> eseguiti con cwd=project root
+#                          (convenzione: patch usa DOCKERFILE=".devcontainer/Dockerfile")
+# Entrambe le convenzioni coesistono. I patch sono eseguiti in ordine alfabetico,
+# .devcontainer/ prima, project root poi. I patch DEVONO essere idempotenti.
+# Eseguiamo via 'bash' per non dipendere dal bit +x.
+run_dockerfile_patches() {
+    local project_root="$1"
+    local dc_dir="$project_root/.devcontainer"
+    local header_shown=false
+    local search_dir patch name rel rc
+
+    for search_dir in "$dc_dir" "$project_root"; do
+        [ -d "$search_dir" ] || continue
+        # find + sort: ordine alfabetico portabile (BSD find su macOS, GNU su Linux)
+        while IFS= read -r patch; do
+            [ -z "$patch" ] && continue
+            if ! $header_shown; then
+                header "=== Applying Dockerfile patches ==="
+                header_shown=true
+            fi
+            name=$(basename "$patch")
+            rel="${patch#$project_root/}"
+            info "Running: $rel"
+            # Subshell + 'set +e' locale: anche se 'set -e' e' attivo nel parent,
+            # un patch fallito non deve abortire claudebox. Catturiamo rc e warn.
+            rc=0
+            ( cd "$search_dir" && bash "./$name" patch ) || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                ok "$name applicato"
+            else
+                warn "$name ha restituito exit code $rc"
+            fi
+        done < <(find "$search_dir" -maxdepth 1 -type f -name 'patch-dockerfile*.sh' 2>/dev/null | sort)
+    done
+
+    $header_shown && echo ""
+    return 0
+}
+
 # ── URL base file ufficiali Anthropic ───────────────────────────────────────────
 ANTHROPIC_RAW_BASE='https://raw.githubusercontent.com/anthropics/claude-code/main/.devcontainer'
 
@@ -171,60 +214,6 @@ download_file() {
         err "curl or wget not found. Please install one and try again."
     fi
     ok "$label scaricato da GitHub ufficiale"
-}
-
-# ── Dockerfile patches: discovery + execution ──────────────────────────────────
-# Cerca file che matchano 'patch-dockerfile*.sh' in DUE posizioni:
-#   1. .devcontainer/    -> eseguiti con cwd=.devcontainer/
-#                           (convenzione: patch usa DOCKERFILE="Dockerfile")
-#   2. project root      -> eseguiti con cwd=project root
-#                           (convenzione: patch usa DOCKERFILE=".devcontainer/Dockerfile")
-# Questo permette a patch scritti con entrambe le convenzioni di funzionare
-# senza modifiche. Il glob 'patch-dockerfile*.sh' cattura sia
-# 'patch-dockerfile.sh' che 'patch-dockerfile-java.sh', etc.
-# Pensato per essere chiamato dopo ogni 'init'/'update' (che riscaricano il
-# Dockerfile ufficiale e cancellerebbero eventuali modifiche custom) e anche
-# come safety net all'inizio di 'up'. I patch DEVONO essere idempotenti.
-apply_dockerfile_patches() {
-    local project_root="$1"
-    local dc_dir="$project_root/.devcontainer"
-    local found=0 patch name rel
-
-    _run_patch_in() {
-        local dir="$1" pfile="$2"
-        [ -f "$pfile" ] || return 0
-        if [ $found -eq 0 ]; then
-            header "=== Applying Dockerfile patches ==="
-            found=1
-        fi
-        name=$(basename "$pfile")
-        # Path relativo rispetto alla project root, solo per il log
-        rel="${pfile#$project_root/}"
-        info "Running: $rel"
-        chmod +x "$pfile" 2>/dev/null || true
-        # Eseguiamo il patch in una subshell cosi' 'set -e' del main non aborta
-        # se il patch restituisce non-zero.
-        if ( cd "$dir" && bash "$name" patch ); then
-            ok "$name applicato"
-        else
-            warn "$name ha restituito errore (exit non-zero)"
-        fi
-    }
-
-    # 1. Patches in .devcontainer/
-    if [ -d "$dc_dir" ]; then
-        for patch in "$dc_dir"/patch-dockerfile*.sh; do
-            _run_patch_in "$dc_dir" "$patch"
-        done
-    fi
-
-    # 2. Patches in project root
-    for patch in "$project_root"/patch-dockerfile*.sh; do
-        _run_patch_in "$project_root" "$patch"
-    done
-
-    [ $found -eq 1 ] && echo ""
-    return 0
 }
 
 # ── AUTO-INSTALLAZIONE ──────────────────────────────────────────────────────────
@@ -416,8 +405,8 @@ EOF
     ok "Downloaded .devcontainer/Dockerfile (official Anthropic)"
     ok "Downloaded .devcontainer/init-firewall.sh (official Anthropic)"
 
-    # Applica eventuali patch custom presenti in .devcontainer/ o in project root
-    apply_dockerfile_patches "$(pwd)"
+    # Apply project-specific Dockerfile patches (idempotent, see README)
+    run_dockerfile_patches "$(pwd)"
 
     echo ""
     info "Next step: claudebox up"
@@ -435,10 +424,10 @@ cmd_up() {
 
     header "=== Starting devcontainer '$proj' ==="
 
-    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
-    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
-    # non fanno nulla.
-    apply_dockerfile_patches "$(pwd)"
+    # Safety net: ri-applica patch project-specific (caso: aggiunti dopo init,
+    # oppure update upstream ha sovrascritto il Dockerfile da un'altra sessione).
+    # I patch sono idempotenti, quindi se gia' applicati e' un no-op.
+    run_dockerfile_patches "$(pwd)"
 
     # Pin versione Claude Code nel Dockerfile (prima della build)
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -518,12 +507,40 @@ cmd_up() {
         docker rm -f "$cname" >/dev/null
     fi
 
+    # Docker-outside-of-Docker (DooD) support
+    # Se il Dockerfile contiene il marker del patch docker, montiamo il socket
+    # dell'host dentro al container e allineiamo il GID del gruppo 'docker'
+    # con quello del docker.sock dell'host (necessario su Linux).
+    # Su macOS/Windows con Docker Desktop il GID alignment non e' richiesto:
+    # il socket e' esposto world-rw dalla VM, ma --group-add non fa danno.
+    local docker_extra_opts=()
+    if [ -f ".devcontainer/Dockerfile" ] \
+       && grep -qF "CLAUDEBOX_PATCH_DOCKER_BEGIN" ".devcontainer/Dockerfile"; then
+        if [ -S /var/run/docker.sock ]; then
+            docker_extra_opts+=( -v "/var/run/docker.sock:/var/run/docker.sock" )
+            info "Docker patch detected: mounting host docker.sock (DooD)"
+            # GID detection portabile: GNU stat (Linux) vs BSD stat (macOS).
+            local sock_gid=""
+            sock_gid=$(stat -c '%g' /var/run/docker.sock 2>/dev/null \
+                       || stat -f '%g' /var/run/docker.sock 2>/dev/null \
+                       || true)
+            if [ -n "$sock_gid" ] && [ "$sock_gid" != "0" ]; then
+                docker_extra_opts+=( --group-add "$sock_gid" )
+                info "  + --group-add $sock_gid (matching host docker.sock GID)"
+            fi
+        else
+            warn "Docker patch detected but /var/run/docker.sock not found on host."
+            warn "Docker CLI inside the container will fail to reach a daemon."
+        fi
+    fi
+
     # Start container
     info "Starting container '$cname'..."
     docker run -d \
         --name "$cname" \
         --cap-add=NET_ADMIN \
         --cap-add=NET_RAW \
+        ${docker_extra_opts[@]+"${docker_extra_opts[@]}"} \
         -v "$(pwd):/workspace:cached" \
         -v "${CLAUDE_CONFIG_DIR}:/host-claude:ro" \
         -v "${CLAUDE_PLUGINS_DIR}:/host-claude-plugins:ro" \
@@ -665,8 +682,8 @@ cmd_update() {
     download_file "$ANTHROPIC_RAW_BASE/init-firewall.sh" "$dc_dir/init-firewall.sh" "init-firewall.sh"
     chmod +x "$dc_dir/init-firewall.sh"
 
-    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
-    apply_dockerfile_patches "$(pwd)"
+    # Re-apply project-specific patches (the download just wiped them)
+    run_dockerfile_patches "$(pwd)"
 
     echo ""
     ok "Official files updated. devcontainer.json unchanged."

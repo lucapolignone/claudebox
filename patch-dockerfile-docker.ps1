@@ -1,31 +1,47 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    patch-dockerfile-java.ps1 -- aggiunge Java 21 + Maven al Dockerfile di claudebox
+    patch-dockerfile-docker.ps1 -- aggiunge Docker CLI + Buildx + Compose v2 al Dockerfile di claudebox
 
 .DESCRIPTION
-    Appende al Dockerfile ufficiale un layer con OpenJDK 21 (Eclipse Temurin) e
-    Apache Maven. Idempotente: usa marker per rilevare se il patch e' gia' presente.
+    Installa nel container il client Docker e i plugin buildx/compose dal repo
+    ufficiale download.docker.com. NON installa il daemon dockerd: il modello e'
+    Docker-outside-of-Docker, il container parla al docker dell'HOST tramite il
+    socket Unix.
 
 .PARAMETER Command
     Comando: patch | remove | status | help (default: patch)
 
 .NOTES
     POSIZIONAMENTO CONSIGLIATO:
-        .devcontainer\patch-dockerfile-java.ps1
+        .devcontainer\patch-dockerfile-docker.ps1
     claudebox lo esegue AUTOMATICAMENTE dopo init/update e prima di up.
-    Il patch non sparisce piu' quando claudebox ri-scarica il Dockerfile.
+
+    REQUISITO RUNTIME (importante!):
+        Il container deve montare il socket Docker dell'host:
+            -v /var/run/docker.sock:/var/run/docker.sock
+        Senza il bind mount, qualsiasi comando docker fallira' con:
+            Cannot connect to the Docker daemon at unix:///var/run/docker.sock
+
+    NOTE GID (Linux):
+        Il GID del gruppo 'docker' dentro il container quasi certamente NON
+        matcha quello del docker.sock host. Su macOS/Windows con Docker Desktop
+        nessun problema (il socket e' esposto world-rw nella VM). Su Linux:
+        chmod 666 sul socket (solo dev) oppure --group-add con il GID del
+        socket host (claudebox lo gestisce automaticamente).
+
+    COSA INSTALLA:
+        docker             Client (run, ps, build, push, ...)
+        docker buildx      Build multi-arch con BuildKit
+        docker compose     Compose v2 (plugin, NON 'docker-compose' v1)
 
 .EXAMPLE
-    # Workflow automatico:
-    Copy-Item patch-dockerfile-java.ps1 .devcontainer\
+    Copy-Item patch-dockerfile-docker.ps1 .devcontainer\
     claudebox start -y
 
 .EXAMPLE
-    # Workflow manuale:
-    claudebox init
-    .\patch-dockerfile-java.ps1 patch
-    claudebox start -y -n
+    $env:DOCKER_CHANNEL = 'test'
+    .\patch-dockerfile-docker.ps1 patch
 #>
 [CmdletBinding()]
 param(
@@ -38,10 +54,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ── Configurazione ─────────────────────────────────────────────────────────────
-if (-not $env:MAVEN_VERSION) { $env:MAVEN_VERSION = '3.9.9' }
-$MAVEN_VERSION = $env:MAVEN_VERSION
-$MARKER_BEGIN  = '# >>> CLAUDEBOX_PATCH_JAVA_BEGIN >>>'
-$MARKER_END    = '# <<< CLAUDEBOX_PATCH_JAVA_END <<<'
+if (-not $env:DOCKER_CHANNEL) { $env:DOCKER_CHANNEL = 'stable' }
+$DOCKER_CHANNEL = $env:DOCKER_CHANNEL
+$MARKER_BEGIN   = '# >>> CLAUDEBOX_PATCH_DOCKER_BEGIN >>>'
+$MARKER_END     = '# <<< CLAUDEBOX_PATCH_DOCKER_END <<<'
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
 function Write-Info ($msg) { Write-Host "  $([char]0x25B8) $msg" -ForegroundColor Cyan   }
@@ -50,10 +66,6 @@ function Write-Warn ($msg) { Write-Host "  $([char]0x26A0) $msg" -ForegroundColo
 function Write-Err  ($msg) { Write-Host "  $([char]0x2716) $msg" -ForegroundColor Red; exit 1 }
 
 # ── Dockerfile discovery ───────────────────────────────────────────────────────
-# Il patch script puo' essere eseguito da 3 contesti diversi:
-#   a) da claudebox.ps1 (cwd=.devcontainer\)       -> .\Dockerfile
-#   b) dall'utente in project root                  -> .\.devcontainer\Dockerfile
-#   c) dall'utente in .devcontainer\                -> .\Dockerfile
 function Find-Dockerfile {
     $candidates = @(
         $env:DOCKERFILE,                  # override esplicito via env var
@@ -77,7 +89,7 @@ function Invoke-Patch {
 
     $content = [System.IO.File]::ReadAllText($DOCKERFILE)
     if ($content.Contains($MARKER_BEGIN)) {
-        Write-Ok "Patch Java gia' presente in $DOCKERFILE. Niente da fare."
+        Write-Ok "Patch docker gia' presente in $DOCKERFILE. Niente da fare."
         return
     }
 
@@ -87,54 +99,46 @@ function Invoke-Patch {
         Write-Ok "Backup in $backupPath"
     }
 
-    # Blocco Dockerfile -- LF come line ending (gira in container Linux)
+    # IMPORTANTE: la line-continuation del Dockerfile e' '\' (backslash).
+    # In una here-string PowerShell @"..."@ i backslash sono LETTERALI: basta
+    # scriverli cosi' come sono. NON usare ` `` ` (escape per backtick literale)
+    # come continuation, che produce ` ` ` nel file e Docker rifiuta il parse.
     $patch = @"
 
 
 $MARKER_BEGIN
-# Java 21 (Eclipse Temurin) + Maven $MAVEN_VERSION
-# Aggiunto da patch-dockerfile-java.ps1 -- il patch e' idempotente e viene
-# riapplicato automaticamente da claudebox se il file e' in .devcontainer\
+# Docker CLI + Buildx + Compose v2 (Docker-outside-of-Docker)
+# Aggiunto da patch-dockerfile-docker.ps1 -- riapplicato automaticamente da claudebox.
+#
+# Modello: il container NON ha un daemon dockerd proprio. Parla al docker
+# dell'HOST via socket Unix. A runtime serve:
+#   -v /var/run/docker.sock:/var/run/docker.sock
 
 USER root
 
-# 1. Eclipse Temurin 21 JDK via repo Adoptium (cross-distro, cross-arch)
+# 1. Repo ufficiale Docker (cross-distro: rileva ubuntu vs debian dal codename)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget gnupg apt-transport-https ca-certificates \
-    && wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
-        | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
-    && chmod a+r /usr/share/keyrings/adoptium.gpg \
+        ca-certificates curl gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
     && . /etc/os-release \
-    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb `${VERSION_CODENAME} main" \
-        > /etc/apt/sources.list.d/adoptium.list \
-    && apt-get update && apt-get install -y --no-install-recommends temurin-21-jdk \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && ln -sfn "`$(dirname `$(dirname `$(readlink -f /usr/bin/java)))" /usr/local/java-21
+    && DOCKER_DISTRO=`$( [ "`$ID" = "ubuntu" ] && echo ubuntu || echo debian ) \
+    && curl -fsSL "https://download.docker.com/linux/`${DOCKER_DISTRO}/gpg" \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=`$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/`${DOCKER_DISTRO} `${VERSION_CODENAME} $DOCKER_CHANNEL" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/local/java-21
-ENV PATH="`${JAVA_HOME}/bin:`${PATH}"
-
-# 2. Maven $MAVEN_VERSION da Apache archive (conserva TUTTE le versioni; dlcdn tiene solo le ultime)
-RUN curl -fsSL \
-    "https://archive.apache.org/dist/maven/maven-3/$MAVEN_VERSION/binaries/apache-maven-$MAVEN_VERSION-bin.tar.gz" \
-    | tar -xzC /opt \
-    && ln -s "/opt/apache-maven-$MAVEN_VERSION" /opt/maven \
-    && ln -sf /opt/maven/bin/mvn      /usr/local/bin/mvn \
-    && ln -sf /opt/maven/bin/mvnDebug /usr/local/bin/mvnDebug
-
-ENV MAVEN_HOME=/opt/maven
-ENV PATH="`${MAVEN_HOME}/bin:`${PATH}"
-
-# 3. Persist env anche per login shell (/etc/profile.d sourced da zsh/bash)
-RUN printf '%s\n' \
-        'export JAVA_HOME=/usr/local/java-21' \
-        'export MAVEN_HOME=/opt/maven' \
-        'export PATH="`$JAVA_HOME/bin:`$MAVEN_HOME/bin:`$PATH"' \
-        > /etc/profile.d/java-maven.sh \
-    && chmod +x /etc/profile.d/java-maven.sh
-
-# 4. Smoke test: fallisce la build se qualcosa non va
-RUN java -version 2>&1 && mvn --version && which java && which mvn
+# 2. Aggiungi 'node' al gruppo docker per parlare al socket senza sudo.
+#    Il pacchetto docker-ce-cli NON crea il gruppo (lo fa docker-ce, che non
+#    installiamo), quindi lo creiamo a mano. Il GID e' arbitrario; al runtime
+#    potrebbe non matchare il GID del docker.sock dell'host (vedi note in cima).
+RUN groupadd -f docker && usermod -aG docker node
 
 USER node
 $MARKER_END
@@ -144,7 +148,8 @@ $MARKER_END
     $combined = ($content.TrimEnd() + ($patch -replace "`r`n", "`n")) -replace "`r`n", "`n"
     [System.IO.File]::WriteAllText($DOCKERFILE, $combined)
 
-    Write-Ok "Dockerfile patchato ($DOCKERFILE): Java 21 + Maven $MAVEN_VERSION."
+    Write-Ok "Dockerfile patchato ($DOCKERFILE): docker CLI + buildx + compose ($DOCKER_CHANNEL)."
+    Write-Info "Ricorda di montare il socket a runtime: -v /var/run/docker.sock:/var/run/docker.sock"
 }
 
 # ── remove ─────────────────────────────────────────────────────────────────────
@@ -165,20 +170,20 @@ function Invoke-Remove {
     }
 
     if (-not $removed) {
-        Write-Ok "Nessun patch Java trovato in $DOCKERFILE. Niente da rimuovere."
+        Write-Ok "Nessun patch docker trovato in $DOCKERFILE. Niente da rimuovere."
         return
     }
 
     $result = ($kept -join "`n").TrimEnd() + "`n"
     [System.IO.File]::WriteAllText($DOCKERFILE, $result)
-    Write-Ok "Blocco patch Java rimosso da $DOCKERFILE."
+    Write-Ok "Blocco patch docker rimosso da $DOCKERFILE."
 }
 
 # ── status ─────────────────────────────────────────────────────────────────────
 function Show-Status {
     Write-Host ""
 
-    Write-Host "  Dockerfile trovato   : " -NoNewline -ForegroundColor DarkGray
+    Write-Host "  Dockerfile trovato     : " -NoNewline -ForegroundColor DarkGray
     if ($DOCKERFILE) {
         Write-Host "si'  ($DOCKERFILE)" -ForegroundColor Green
     } else {
@@ -187,19 +192,17 @@ function Show-Status {
         return
     }
 
-    Write-Host "  Patch Java applicato : " -NoNewline -ForegroundColor DarkGray
-    if ([System.IO.File]::ReadAllText($DOCKERFILE).Contains($MARKER_BEGIN)) {
-        $ver = [regex]::Match(
-            [System.IO.File]::ReadAllText($DOCKERFILE),
-            'maven-(\d+\.\d+\.\d+)'
-        ).Groups[1].Value
-        if (-not $ver) { $ver = '?' }
-        Write-Host "si'  (Maven $ver)" -ForegroundColor Green
+    Write-Host "  Patch docker applicato : " -NoNewline -ForegroundColor DarkGray
+    $content = [System.IO.File]::ReadAllText($DOCKERFILE)
+    if ($content.Contains($MARKER_BEGIN)) {
+        $ch = [regex]::Match($content, 'download\.docker\.com/linux/[a-z]+ [a-z]+ ([a-z]+)').Groups[1].Value
+        if (-not $ch) { $ch = '?' }
+        Write-Host "si'  (channel: $ch)" -ForegroundColor Green
     } else {
-        Write-Host "no   (.\patch-dockerfile-java.ps1 patch)" -ForegroundColor Yellow
+        Write-Host "no   (.\patch-dockerfile-docker.ps1 patch)" -ForegroundColor Yellow
     }
 
-    Write-Host "  Backup orig presente : " -NoNewline -ForegroundColor DarkGray
+    Write-Host "  Backup orig presente   : " -NoNewline -ForegroundColor DarkGray
     if (Test-Path -LiteralPath "$DOCKERFILE.orig") {
         Write-Host "si'  ($DOCKERFILE.orig)" -ForegroundColor Green
     } else {
@@ -212,28 +215,37 @@ function Show-Status {
 function Show-Help {
     Write-Host @"
 
-  patch-dockerfile-java.ps1 -- aggiunge Java 21 + Maven al Dockerfile claudebox
+  patch-dockerfile-docker.ps1 -- aggiunge Docker CLI + Buildx + Compose v2
 
   USO
-    .\patch-dockerfile-java.ps1 [comando]
+    .\patch-dockerfile-docker.ps1 [comando]
 
   COMANDI
-    patch    Aggiunge Java 21 + Maven $MAVEN_VERSION (default, idempotente)
+    patch    Aggiunge Docker CLI + buildx + compose plugin (default, idempotente)
     remove   Rimuove il blocco patch
     status   Mostra lo stato corrente
     help     Mostra questo messaggio
 
   POSIZIONAMENTO CONSIGLIATO
-    .devcontainer\patch-dockerfile-java.ps1
+    .devcontainer\patch-dockerfile-docker.ps1
     -> claudebox lo esegue automaticamente dopo init/update e prima di up.
 
   VARIABILI AMBIENTE
-    MAVEN_VERSION  Versione Maven (default: $MAVEN_VERSION)
-    DOCKERFILE     Path al Dockerfile (override auto-discovery)
+    DOCKER_CHANNEL   Canale apt Docker: 'stable' (default), 'test'
+    DOCKERFILE       Path al Dockerfile (override auto-discovery)
 
   WORKFLOW AUTOMATICO
-    Copy-Item patch-dockerfile-java.ps1 .devcontainer\
+    Copy-Item patch-dockerfile-docker.ps1 .devcontainer\
     claudebox start -y
+
+  REQUISITO RUNTIME
+    Il container deve montare il socket dell'host:
+      -v /var/run/docker.sock:/var/run/docker.sock
+
+  COSA OTTIENI NEL CONTAINER
+    docker             Client (run, ps, build, push, ...)
+    docker buildx      Build moderno multi-arch con BuildKit
+    docker compose     Compose v2 (plugin, NON 'docker-compose' v1)
 
 "@ -ForegroundColor White
 }

@@ -495,11 +495,11 @@ function Invoke-Init {
     Write-Host "    Dockerfile        <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
-    Write-Host ""
 
-    # Applica eventuali patch custom presenti in .devcontainer/
+    # Apply project-specific Dockerfile patches (idempotent, see README)
     Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
+    Write-Host ""
     Write-Info "Next step: claudebox up"
 }
 
@@ -516,11 +516,6 @@ function Invoke-Up {
     # NOTA: evitiamo di sovrascrivere $PWD (variabile automatica di PowerShell)
     $currentDir = (Get-Location).Path
 
-    # Safety net: se l'utente ha aggiunto un nuovo patch dopo l'init, lo applica
-    # ora prima della build. I patch sono idempotenti: se sono gia' applicati
-    # non fanno nulla.
-    Invoke-DockerfilePatches -ProjectRoot $currentDir
-
     # Normalize path for Docker (convert backslash -> slash and C: -> /c)
     # Convert C:\foo\bar -> /c/foo/bar (scriptblock in -replace does not work in PS 5.x)
     function Convert-ToDockerPath([string]$winPath) {
@@ -536,6 +531,11 @@ function Invoke-Up {
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
 
     Write-Header "=== Starting devcontainer '$proj' ==="
+
+    # Safety net: ri-applica patch project-specific (caso: aggiunti dopo init,
+    # oppure update upstream ha sovrascritto il Dockerfile da un'altra sessione).
+    # I patch sono idempotenti, quindi se gia' applicati e' un no-op.
+    Invoke-DockerfilePatches -ProjectRoot $currentDir
 
     # -- Pin versione Claude Code nel Dockerfile (prima della build) ------------
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -628,12 +628,30 @@ function Invoke-Up {
         docker rm -f $cname | Out-Null
     }
 
+    # -- Docker-outside-of-Docker (DooD) support --------------------------------
+    # Se il Dockerfile contiene il marker del patch docker, montiamo il socket
+    # dell'host dentro al container.
+    # Su Windows con Docker Desktop, /var/run/docker.sock e' un proxy esposto
+    # automaticamente: il bind mount funziona anche se il path "Unix" non
+    # esiste lato host. GID alignment non serve (Docker Desktop espone il
+    # socket world-rw nella VM WSL2/HyperKit), quindi niente --group-add.
+    $dockerExtraOpts = @()
+    $dockerfilePath = '.devcontainer\Dockerfile'
+    if (Test-Path -LiteralPath $dockerfilePath) {
+        $dockerfileContent = Get-Content -LiteralPath $dockerfilePath -Raw
+        if ($dockerfileContent -match 'CLAUDEBOX_PATCH_DOCKER_BEGIN') {
+            $dockerExtraOpts += @('-v', '/var/run/docker.sock:/var/run/docker.sock')
+            Write-Info "Docker patch detected: mounting host docker.sock (DooD)"
+        }
+    }
+
     # -- Avvia container --------------------------------------------------------
     Write-Info "Starting container '$cname'..."
     docker run -d `
         --name $cname `
         --cap-add=NET_ADMIN `
         --cap-add=NET_RAW `
+        @dockerExtraOpts `
         -v "${dockerWorkspace}:/workspace:cached" `
         -v "${dockerConfigDir}:/host-claude:ro" `
         -v "${dockerPluginsDir}:/host-claude-plugins:ro" `
@@ -781,7 +799,7 @@ function Invoke-Update {
         -Dest "$dcDir\init-firewall.sh" `
         -Label "init-firewall.sh"
 
-    # Riapplica i patch custom (l'update ha appena sovrascritto il Dockerfile)
+    # Re-apply project-specific patches (the download just wiped them)
     Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
     Write-Host ""
