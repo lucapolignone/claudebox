@@ -755,6 +755,37 @@ for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
         Write-Warn "Firewall not applied (NET_ADMIN may not be available)."
     }
 
+    # -- Docker.sock alignment (DooD) -------------------------------------------
+    # Se il patch docker e' applicato, allinea il socket al gruppo 'docker'.
+    # Necessario su Docker Desktop / sandbox via proxy, dove il bind-mount
+    # espone il socket come root:root 660 indipendentemente dal GID reale
+    # dell'host. Idempotente.
+    $dockerfilePath = '.devcontainer\Dockerfile'
+    if (Test-Path -LiteralPath $dockerfilePath) {
+        $dockerfileContent = Get-Content -LiteralPath $dockerfilePath -Raw
+        if ($dockerfileContent -match 'CLAUDEBOX_PATCH_DOCKER_BEGIN') {
+            try {
+                # bash -c con script multilinea: usiamo qui-string PS single-quoted
+                # per evitare interpolazioni indesiderate.
+                $align = @'
+[ -S /var/run/docker.sock ] || exit 0
+cur=$(stat -c "%G" /var/run/docker.sock 2>/dev/null || echo "?")
+[ "$cur" = "docker" ] && exit 0
+chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
+'@
+                docker exec -u root $cname bash -c $align 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Ok "Docker socket aligned to 'docker' group (node user can use docker)"
+                } else {
+                    Write-Warn "Could not align docker.sock group inside container."
+                    Write-Warn "Inside the container, run: sudo chgrp docker /var/run/docker.sock && sudo chmod 660 /var/run/docker.sock"
+                }
+            } catch {
+                Write-Warn "docker.sock alignment failed: $_"
+            }
+        }
+    }
+
     # -- Verifica isolamento ----------------------------------------------------
     Write-Header "=== Container isolation check ==="
     $workdir = docker exec -u node $cname pwd

@@ -564,6 +564,26 @@ cmd_up() {
         warn "Firewall not applied (NET_ADMIN may not be available)."
     fi
 
+    # Docker.sock alignment (DooD): se il patch docker e' applicato, allinea il
+    # socket dentro al container al gruppo 'docker'. Necessario su Docker
+    # Desktop / sandbox via proxy, dove il bind-mount espone il socket come
+    # root:root 660 indipendentemente dal GID reale dell'host -- quindi
+    # --group-add (passato in docker run) da solo non basta. Idempotente.
+    if [ -f ".devcontainer/Dockerfile" ] \
+       && grep -qF "CLAUDEBOX_PATCH_DOCKER_BEGIN" ".devcontainer/Dockerfile"; then
+        if docker exec -u root "$cname" bash -c '
+            [ -S /var/run/docker.sock ] || exit 0
+            cur=$(stat -c "%G" /var/run/docker.sock 2>/dev/null || echo "?")
+            [ "$cur" = "docker" ] && exit 0
+            chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
+        ' 2>/dev/null; then
+            ok "Docker socket aligned to 'docker' group (node user can use docker)"
+        else
+            warn "Could not align docker.sock group inside container."
+            warn "Inside the container, run: sudo chgrp docker /var/run/docker.sock && sudo chmod 660 /var/run/docker.sock"
+        fi
+    fi
+
     # Copy config on first start
     docker exec "$cname" bash -c \
         'sudo chown -R node:node /home/node/.claude /home/node/.config 2>/dev/null || true' >/dev/null
