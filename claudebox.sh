@@ -156,49 +156,6 @@ pin_dockerfile_cc_version() {
     return 0
 }
 
-# ── DOCKERFILE PATCHES: discovery + execution ───────────────────────────────────
-# Cerca file che matchano 'patch-dockerfile*.sh' in DUE posizioni:
-#   1. .devcontainer/   -> eseguiti con cwd=.devcontainer/
-#                          (convenzione: patch usa DOCKERFILE="Dockerfile")
-#   2. project root     -> eseguiti con cwd=project root
-#                          (convenzione: patch usa DOCKERFILE=".devcontainer/Dockerfile")
-# Entrambe le convenzioni coesistono. I patch sono eseguiti in ordine alfabetico,
-# .devcontainer/ prima, project root poi. I patch DEVONO essere idempotenti.
-# Eseguiamo via 'bash' per non dipendere dal bit +x.
-run_dockerfile_patches() {
-    local project_root="$1"
-    local dc_dir="$project_root/.devcontainer"
-    local header_shown=false
-    local search_dir patch name rel rc
-
-    for search_dir in "$dc_dir" "$project_root"; do
-        [ -d "$search_dir" ] || continue
-        # find + sort: ordine alfabetico portabile (BSD find su macOS, GNU su Linux)
-        while IFS= read -r patch; do
-            [ -z "$patch" ] && continue
-            if ! $header_shown; then
-                header "=== Applying Dockerfile patches ==="
-                header_shown=true
-            fi
-            name=$(basename "$patch")
-            rel="${patch#$project_root/}"
-            info "Running: $rel"
-            # Subshell + 'set +e' locale: anche se 'set -e' e' attivo nel parent,
-            # un patch fallito non deve abortire claudebox. Catturiamo rc e warn.
-            rc=0
-            ( cd "$search_dir" && bash "./$name" patch ) || rc=$?
-            if [ "$rc" -eq 0 ]; then
-                ok "$name applicato"
-            else
-                warn "$name ha restituito exit code $rc"
-            fi
-        done < <(find "$search_dir" -maxdepth 1 -type f -name 'patch-dockerfile*.sh' 2>/dev/null | sort)
-    done
-
-    $header_shown && echo ""
-    return 0
-}
-
 # ── URL base file ufficiali Anthropic ───────────────────────────────────────────
 ANTHROPIC_RAW_BASE='https://raw.githubusercontent.com/anthropics/claude-code/main/.devcontainer'
 
@@ -404,10 +361,6 @@ EOF
     ok "Generated .devcontainer/devcontainer.json (customized)"
     ok "Downloaded .devcontainer/Dockerfile (official Anthropic)"
     ok "Downloaded .devcontainer/init-firewall.sh (official Anthropic)"
-
-    # Apply project-specific Dockerfile patches (idempotent, see README)
-    run_dockerfile_patches "$(pwd)"
-
     echo ""
     info "Next step: claudebox up"
 }
@@ -423,11 +376,6 @@ cmd_up() {
     cname="$(container_name)"
 
     header "=== Starting devcontainer '$proj' ==="
-
-    # Safety net: ri-applica patch project-specific (caso: aggiunti dopo init,
-    # oppure update upstream ha sovrascritto il Dockerfile da un'altra sessione).
-    # I patch sono idempotenti, quindi se gia' applicati e' un no-op.
-    run_dockerfile_patches "$(pwd)"
 
     # Pin versione Claude Code nel Dockerfile (prima della build)
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -507,40 +455,12 @@ cmd_up() {
         docker rm -f "$cname" >/dev/null
     fi
 
-    # Docker-outside-of-Docker (DooD) support
-    # Se il Dockerfile contiene il marker del patch docker, montiamo il socket
-    # dell'host dentro al container e allineiamo il GID del gruppo 'docker'
-    # con quello del docker.sock dell'host (necessario su Linux).
-    # Su macOS/Windows con Docker Desktop il GID alignment non e' richiesto:
-    # il socket e' esposto world-rw dalla VM, ma --group-add non fa danno.
-    local docker_extra_opts=()
-    if [ -f ".devcontainer/Dockerfile" ] \
-       && grep -qF "CLAUDEBOX_PATCH_DOCKER_BEGIN" ".devcontainer/Dockerfile"; then
-        if [ -S /var/run/docker.sock ]; then
-            docker_extra_opts+=( -v "/var/run/docker.sock:/var/run/docker.sock" )
-            info "Docker patch detected: mounting host docker.sock (DooD)"
-            # GID detection portabile: GNU stat (Linux) vs BSD stat (macOS).
-            local sock_gid=""
-            sock_gid=$(stat -c '%g' /var/run/docker.sock 2>/dev/null \
-                       || stat -f '%g' /var/run/docker.sock 2>/dev/null \
-                       || true)
-            if [ -n "$sock_gid" ] && [ "$sock_gid" != "0" ]; then
-                docker_extra_opts+=( --group-add "$sock_gid" )
-                info "  + --group-add $sock_gid (matching host docker.sock GID)"
-            fi
-        else
-            warn "Docker patch detected but /var/run/docker.sock not found on host."
-            warn "Docker CLI inside the container will fail to reach a daemon."
-        fi
-    fi
-
     # Start container
     info "Starting container '$cname'..."
     docker run -d \
         --name "$cname" \
         --cap-add=NET_ADMIN \
         --cap-add=NET_RAW \
-        ${docker_extra_opts[@]+"${docker_extra_opts[@]}"} \
         -v "$(pwd):/workspace:cached" \
         -v "${CLAUDE_CONFIG_DIR}:/host-claude:ro" \
         -v "${CLAUDE_PLUGINS_DIR}:/host-claude-plugins:ro" \
@@ -562,26 +482,6 @@ cmd_up() {
         ok "Firewall applied"
     else
         warn "Firewall not applied (NET_ADMIN may not be available)."
-    fi
-
-    # Docker.sock alignment (DooD): se il patch docker e' applicato, allinea il
-    # socket dentro al container al gruppo 'docker'. Necessario su Docker
-    # Desktop / sandbox via proxy, dove il bind-mount espone il socket come
-    # root:root 660 indipendentemente dal GID reale dell'host -- quindi
-    # --group-add (passato in docker run) da solo non basta. Idempotente.
-    if [ -f ".devcontainer/Dockerfile" ] \
-       && grep -qF "CLAUDEBOX_PATCH_DOCKER_BEGIN" ".devcontainer/Dockerfile"; then
-        if docker exec -u root "$cname" bash -c '
-            [ -S /var/run/docker.sock ] || exit 0
-            cur=$(stat -c "%G" /var/run/docker.sock 2>/dev/null || echo "?")
-            [ "$cur" = "docker" ] && exit 0
-            chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
-        ' 2>/dev/null; then
-            ok "Docker socket aligned to 'docker' group (node user can use docker)"
-        else
-            warn "Could not align docker.sock group inside container."
-            warn "Inside the container, run: sudo chgrp docker /var/run/docker.sock && sudo chmod 660 /var/run/docker.sock"
-        fi
     fi
 
     # Copy config on first start
@@ -677,13 +577,19 @@ JSEOF
         header "=== First login for profile '$PROFILE' ==="
         echo -e "  ${YELLOW}Please log in with your account for this profile.${NC}"
         echo -e "  ${YELLOW}After login, Claude Code will start automatically.\n${NC}"
-        docker exec -it -u node "$cname" \
+        docker exec -it -u node \
+            -e CLAUDE_CODE_NO_FLICKER=1 \
+            "$cname" \
             zsh -c 'claude login && claude --dangerously-skip-permissions; exec zsh'
     else
         header "=== Launching Claude Code (--dangerously-skip-permissions) ==="
         echo -e "  ${YELLOW}Container is ready. Launching Claude Code...${NC}"
         echo -e "  ${YELLOW}Type 'exit' to leave the container shell.\n${NC}"
-        docker exec -it -u node "$cname" \
+        # CLAUDE_CODE_NO_FLICKER=1 fa partire Claude Code direttamente in
+        # alternate-screen / fullscreen mode senza il transient flicker iniziale.
+        docker exec -it -u node \
+            -e CLAUDE_CODE_NO_FLICKER=1 \
+            "$cname" \
             zsh -c 'claude --dangerously-skip-permissions; exec zsh'
     fi
 }
@@ -701,9 +607,6 @@ cmd_update() {
     download_file "$ANTHROPIC_RAW_BASE/Dockerfile"       "$dc_dir/Dockerfile"       "Dockerfile"
     download_file "$ANTHROPIC_RAW_BASE/init-firewall.sh" "$dc_dir/init-firewall.sh" "init-firewall.sh"
     chmod +x "$dc_dir/init-firewall.sh"
-
-    # Re-apply project-specific patches (the download just wiped them)
-    run_dockerfile_patches "$(pwd)"
 
     echo ""
     ok "Official files updated. devcontainer.json unchanged."
