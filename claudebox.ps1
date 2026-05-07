@@ -347,6 +347,62 @@ function Invoke-Download {
     }
 }
 
+# --- Dockerfile patches: discovery + execution -------------------------------
+# Cerca file che matchano 'patch-dockerfile*.ps1' in DUE posizioni:
+#   1. .devcontainer\    -> eseguiti con cwd=.devcontainer\
+#                           (convenzione: patch usa $DOCKERFILE = 'Dockerfile')
+#   2. project root      -> eseguiti con cwd=project root
+#                           (convenzione: patch usa $DOCKERFILE = '.devcontainer\Dockerfile')
+# Il glob 'patch-dockerfile*.ps1' cattura sia 'patch-dockerfile.ps1' che
+# 'patch-dockerfile-java.ps1', etc. I patch DEVONO essere idempotenti.
+function Invoke-DockerfilePatches {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $dcDir = Join-Path $ProjectRoot '.devcontainer'
+    $script:dfpFound = $false
+
+    function _Run-PatchIn {
+        param([string]$Dir, [string]$PFile)
+        if (-not (Test-Path -LiteralPath $PFile -PathType Leaf)) { return }
+        if (-not $script:dfpFound) {
+            Write-Header "=== Applying Dockerfile patches ==="
+            $script:dfpFound = $true
+        }
+        $name = Split-Path -Leaf $PFile
+        $rel  = $PFile.Substring($ProjectRoot.Length).TrimStart('\', '/')
+        Write-Info "Running: $rel"
+        Push-Location $Dir
+        try {
+            & $PFile patch
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                Write-Warn "$name ha restituito exit code $LASTEXITCODE"
+            } else {
+                Write-Ok "$name applicato"
+            }
+        } catch {
+            Write-Warn "$name ha lanciato un'eccezione: $_"
+        } finally {
+            Pop-Location
+        }
+    }
+
+    # 1. Patches in .devcontainer\
+    if (Test-Path -LiteralPath $dcDir) {
+        Get-ChildItem -Path $dcDir -Filter 'patch-dockerfile*.ps1' -File `
+            -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+            _Run-PatchIn -Dir $dcDir -PFile $_.FullName
+        }
+    }
+
+    # 2. Patches in project root
+    Get-ChildItem -Path $ProjectRoot -Filter 'patch-dockerfile*.ps1' -File `
+        -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+        _Run-PatchIn -Dir $ProjectRoot -PFile $_.FullName
+    }
+
+    if ($script:dfpFound) { Write-Host "" }
+}
+
 function Invoke-Init {
     $proj  = Get-ProjectName
     $dcDir = Join-Path (Get-Location) ".devcontainer"
@@ -439,6 +495,10 @@ function Invoke-Init {
     Write-Host "    Dockerfile        <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
+
+    # Apply project-specific Dockerfile patches (idempotent, see README)
+    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
+
     Write-Host ""
     Write-Info "Next step: claudebox up"
 }
@@ -471,6 +531,11 @@ function Invoke-Up {
     $dockerCcstatuslineDir  = Convert-ToDockerPath $env:CCSTATUSLINE_CONFIG_DIR
 
     Write-Header "=== Starting devcontainer '$proj' ==="
+
+    # Safety net: ri-applica patch project-specific (caso: aggiunti dopo init,
+    # oppure update upstream ha sovrascritto il Dockerfile da un'altra sessione).
+    # I patch sono idempotenti, quindi se gia' applicati e' un no-op.
+    Invoke-DockerfilePatches -ProjectRoot $currentDir
 
     # -- Pin versione Claude Code nel Dockerfile (prima della build) ------------
     # Forza l'invalidazione della cache Docker solo quando c'e' effettivamente
@@ -563,12 +628,30 @@ function Invoke-Up {
         docker rm -f $cname | Out-Null
     }
 
+    # -- Docker-outside-of-Docker (DooD) support --------------------------------
+    # Se il Dockerfile contiene il marker del patch docker, montiamo il socket
+    # dell'host dentro al container.
+    # Su Windows con Docker Desktop, /var/run/docker.sock e' un proxy esposto
+    # automaticamente: il bind mount funziona anche se il path "Unix" non
+    # esiste lato host. GID alignment non serve (Docker Desktop espone il
+    # socket world-rw nella VM WSL2/HyperKit), quindi niente --group-add.
+    $dockerExtraOpts = @()
+    $dockerfilePath = '.devcontainer\Dockerfile'
+    if (Test-Path -LiteralPath $dockerfilePath) {
+        $dockerfileContent = Get-Content -LiteralPath $dockerfilePath -Raw
+        if ($dockerfileContent -match 'CLAUDEBOX_PATCH_DOCKER_BEGIN') {
+            $dockerExtraOpts += @('-v', '/var/run/docker.sock:/var/run/docker.sock')
+            Write-Info "Docker patch detected: mounting host docker.sock (DooD)"
+        }
+    }
+
     # -- Avvia container --------------------------------------------------------
     Write-Info "Starting container '$cname'..."
     docker run -d `
         --name $cname `
         --cap-add=NET_ADMIN `
         --cap-add=NET_RAW `
+        @dockerExtraOpts `
         -v "${dockerWorkspace}:/workspace:cached" `
         -v "${dockerConfigDir}:/host-claude:ro" `
         -v "${dockerPluginsDir}:/host-claude-plugins:ro" `
@@ -672,6 +755,37 @@ for (var i = 0; i < DIRS.length; i++) walk(path.join(DIR, DIRS[i]));
         Write-Warn "Firewall not applied (NET_ADMIN may not be available)."
     }
 
+    # -- Docker.sock alignment (DooD) -------------------------------------------
+    # Se il patch docker e' applicato, allinea il socket al gruppo 'docker'.
+    # Necessario su Docker Desktop / sandbox via proxy, dove il bind-mount
+    # espone il socket come root:root 660 indipendentemente dal GID reale
+    # dell'host. Idempotente.
+    $dockerfilePath = '.devcontainer\Dockerfile'
+    if (Test-Path -LiteralPath $dockerfilePath) {
+        $dockerfileContent = Get-Content -LiteralPath $dockerfilePath -Raw
+        if ($dockerfileContent -match 'CLAUDEBOX_PATCH_DOCKER_BEGIN') {
+            try {
+                # bash -c con script multilinea: usiamo qui-string PS single-quoted
+                # per evitare interpolazioni indesiderate.
+                $align = @'
+[ -S /var/run/docker.sock ] || exit 0
+cur=$(stat -c "%G" /var/run/docker.sock 2>/dev/null || echo "?")
+[ "$cur" = "docker" ] && exit 0
+chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
+'@
+                docker exec -u root $cname bash -c $align 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Ok "Docker socket aligned to 'docker' group (node user can use docker)"
+                } else {
+                    Write-Warn "Could not align docker.sock group inside container."
+                    Write-Warn "Inside the container, run: sudo chgrp docker /var/run/docker.sock && sudo chmod 660 /var/run/docker.sock"
+                }
+            } catch {
+                Write-Warn "docker.sock alignment failed: $_"
+            }
+        }
+    }
+
     # -- Verifica isolamento ----------------------------------------------------
     Write-Header "=== Container isolation check ==="
     $workdir = docker exec -u node $cname pwd
@@ -721,6 +835,9 @@ function Invoke-Update {
         -Url  "$ANTHROPIC_RAW_BASE/init-firewall.sh" `
         -Dest "$dcDir\init-firewall.sh" `
         -Label "init-firewall.sh"
+
+    # Re-apply project-specific patches (the download just wiped them)
+    Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
     Write-Host ""
     Write-Ok "Official files updated. devcontainer.json unchanged."
