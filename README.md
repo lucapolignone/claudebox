@@ -174,6 +174,7 @@ docker compose up -d
 claudebox start -p work -y
 
 # In un altro terminale, collega il devcontainer alla rete dello stack
+# (il patch va prima copiato nel progetto target — vedi patches/patch-dockerfile.sh)
 ./patch-dockerfile.sh connect
 ```
 
@@ -352,28 +353,34 @@ Stai lanciando claudebox dall'interno della cartella `.devcontainer/`. Il nome d
 ```
 .
 ├── README.md                           <- questo file
+├── CLAUDE.md                           <- guida per Claude Code che lavora su questa repo
 ├── claudebox.sh                        <- script principale (macOS/Linux)
 ├── claudebox.ps1                       <- script principale (Windows)
-├── patch-dockerfile.sh                 <- patch project-specific (PHP + yougo-dev)
-├── patch-dockerfile.ps1                <- idem per Windows
-├── patch-dockerfile-java.sh            <- patch riusabile (Java 21 + Maven)
-├── patch-dockerfile-java.ps1           <- idem per Windows
-├── patch-dockerfile-uvx.sh             <- patch riusabile (uv + uvx)
-├── patch-dockerfile-uvx.ps1            <- idem per Windows
-└── .devcontainer/                      <- generato da claudebox init (gitignora o committa)
+├── patches/                            <- patch templates da copiare nei progetti
+│   ├── patch-dockerfile-docker.sh      <- patch riusabile (Docker CLI + buildx + compose, DooD)
+│   ├── patch-dockerfile-docker.ps1     <- idem per Windows
+│   ├── patch-dockerfile-java.sh        <- patch riusabile (Java 21 + Maven)
+│   ├── patch-dockerfile-java.ps1       <- idem per Windows
+│   ├── patch-dockerfile-uvx.sh         <- patch riusabile (uv + uvx)
+│   ├── patch-dockerfile-uvx.ps1        <- idem per Windows
+│   ├── patch-dockerfile.sh             <- patch project-specific (PHP + rete yougo-dev)
+│   └── patch-dockerfile.ps1            <- idem per Windows
+└── .devcontainer/                      <- generato da claudebox init nel TUO progetto, non in questa repo
     ├── Dockerfile                      <- scaricato da Anthropic + patch appesi
     ├── Dockerfile.orig                 <- backup pre-patch (creato al primo run)
     ├── devcontainer.json               <- generato da claudebox (customizzato)
     └── init-firewall.sh                <- scaricato da Anthropic
 ```
 
+> I file in `patches/` sono **template**: vanno copiati nel progetto target (in `.devcontainer/` o nella project root). Lo script `claudebox.sh` cerca patch nel progetto target, **non in questa repo**.
+
 ### Cosa committare
 
 **Sempre**:
 
 - `claudebox.sh` / `claudebox.ps1`
-- `patch-dockerfile*.sh` / `patch-dockerfile*.ps1`
-- `README.md`
+- `patches/patch-dockerfile*.sh` / `patches/patch-dockerfile*.ps1`
+- `README.md` / `CLAUDE.md`
 
 **Opzionale** (dipende dal team):
 

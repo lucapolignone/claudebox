@@ -1,0 +1,10 @@
+# Devcontainer locale generato da `claudebox init` — non versionare
+.devcontainer/
+
+# IDE
+.idea/
+.vscode/
+
+# Backup automatici creati dalle patch (Dockerfile.orig)
+.devcontainer/Dockerfile.orig
+*.orig
