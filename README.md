@@ -228,6 +228,43 @@ Quando usi un profilo nuovo per la prima volta, claudebox seeda automaticamente 
 
 ---
 
+## GitLab credentials
+
+Claudebox può iniettare nel container, opt-in e per-profilo, le credenziali GitLab presenti sull'host:
+
+- la variabile `GITLAB_TOKEN` (se settata nello shell host) viene esposta come env var nel container;
+- la dir `~/.config/glab-cli/` (config della CLI [`glab`](https://gitlab.com/gitlab-org/cli)) viene bind-montata read-only e copiata in `/home/node/.config/glab-cli/`.
+
+La scelta sì/no viene chiesta al primo `claudebox init` o `claudebox start` di un profilo, con default `yes`, e salvata in `~/.config/claudebox/<profilo>.conf` (formato `KEY=value`):
+
+```
+INJECT_GITLAB_CREDS=yes
+```
+
+Per cambiare la scelta successivamente, edita a mano il file:
+
+```bash
+echo 'INJECT_GITLAB_CREDS=no' > ~/.config/claudebox/work.conf
+```
+
+L'iniezione di credenziali è utile anche **senza** la CLI `glab`: `GITLAB_TOKEN` viene usato da `git` HTTPS con credential helpers, da Maven con un `settings.xml` che referenzia env var, e da script custom.
+
+Per avere anche la CLI `glab` dentro al container, copia la patch dedicata nel progetto:
+
+```bash
+cp /percorso/a/claudebox/patches/patch-dockerfile-glab.sh .devcontainer/
+chmod +x .devcontainer/patch-dockerfile-glab.sh
+claudebox start
+```
+
+### Trade-off di sicurezza
+
+- Il token come env var (`-e GITLAB_TOKEN=...`) è visibile a chi può chiamare `docker inspect` sul container. È il modello standard di Docker, accettato dal design.
+- La config dir è montata read-only: il container non può modificare lo stato di `glab` sull'host.
+- Il file `~/.config/claudebox/<profilo>.conf` contiene solo un flag yes/no, mai il token.
+
+---
+
 ## Scrivere un patch custom
 
 Template minimo, idempotente, da copiare in `.devcontainer/patch-dockerfile-<nome>.sh`:

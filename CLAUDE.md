@@ -17,6 +17,7 @@ I due script devono restare allineati: ogni feature/fix che tocca uno dei due va
 claudebox.sh / .ps1     entry point (install + comandi: init/up/start/update/...)
 patches/                template di patch da copiare nei progetti target
   patch-dockerfile-docker.{sh,ps1}    Docker CLI + buildx + compose (DooD)
+  patch-dockerfile-glab.{sh,ps1}      GitLab CLI 'glab'
   patch-dockerfile-java.{sh,ps1}      Eclipse Temurin 21 + Maven
   patch-dockerfile-uvx.{sh,ps1}       uv + uvx (Astral)
   patch-dockerfile.{sh,ps1}           project-specific (PHP + rete yougo-dev)
@@ -70,7 +71,7 @@ Esempi di fix portabili sono già nel codice marcati con `# FIX:` — leggi i co
 ## Comandi utente (cosa fa cosa)
 
 - `claudebox install` — copia lo script in `~/.local/bin` (o `~/bin`) e aggiunge al `PATH`.
-- `claudebox init` — scarica Dockerfile + init-firewall.sh ufficiali Anthropic, genera `devcontainer.json`, applica le patch.
+- `claudebox init` — scarica Dockerfile + init-firewall.sh ufficiali Anthropic, genera `devcontainer.json`, **chiede una volta sola se iniettare le credenziali GitLab dell'host** (default sì, persistito in `~/.config/claudebox/<profilo>.conf`), applica le patch.
 - `claudebox update` — ri-scarica Dockerfile + init-firewall.sh (devcontainer.json invariato), riapplica le patch.
 - `claudebox up` — applica patch (safety net), pinna versione `@anthropic-ai/claude-code` da npm, builda immagine, fa partire container con bind mount appropriati, inizializza firewall, lancia `claude --dangerously-skip-permissions`.
 - `claudebox start` — chiede se aggiornare (default no), poi `init` (se serve) o `update` (se richiesto), poi `up`. Flag `-y` salta tutti i prompt.
@@ -79,6 +80,17 @@ Esempi di fix portabili sono già nel codice marcati con `# FIX:` — leggi i co
 ## Profili
 
 `-p <nome>` separa CLAUDE_CONFIG_DIR e volume condiviso per profilo (`personal` default; `work` → `~/.claude-work`; ecc.). Il container name include il profilo (tranne `personal`, per retrocompatibilità).
+
+## GitLab credentials injection
+
+`cmd_up` legge `~/.config/claudebox/<profilo>.conf` (chiave `INJECT_GITLAB_CREDS`). Se `yes`, aggiunge al `docker run`:
+
+- `-v "$HOME/.config/glab-cli:/host-glab-cli:ro"` (se la dir esiste sull'host);
+- `-e GITLAB_TOKEN` (se l'env var è set sull'host).
+
+Il `postStartCommand` in `devcontainer.json` copia `/host-glab-cli/` in `/home/node/.config/glab-cli/`. Un safety-net `docker exec` in `cmd_up` ripete la copia per chi ha fatto `init` prima di questa feature.
+
+Il prompt avviene in `cmd_init` (prima di `run_dockerfile_patches`) e in `cmd_start` (subito dopo il prompt "Update?"). Default: `yes`. In non-TTY o con `-y`, viene salvato il default senza chiedere.
 
 ## Docker-outside-of-Docker (DooD)
 
