@@ -111,6 +111,27 @@ function Set-ProfileConfValue ([string]$Key, [string]$Value) {
     [System.IO.File]::WriteAllBytes($conf, $bytes)
 }
 
+# Chiede una volta sola se iniettare le credenziali GitLab e salva nel conf
+# del profilo. Default yes. In non-TTY o con -y, salva default senza prompt.
+function Ensure-GitlabCredsChoice {
+    $current = Get-ProfileConfValue 'INJECT_GITLAB_CREDS'
+    if (-not [string]::IsNullOrEmpty($current)) { return }
+
+    # Non-interattivo (host script, redirection): salva default
+    if (-not [Environment]::UserInteractive -or -not $Host.UI.RawUI) {
+        Set-ProfileConfValue 'INJECT_GITLAB_CREDS' 'yes'
+        return
+    }
+
+    # Read-InputOrDefault rispetta gia' $AutoYes (claudebox.ps1:57)
+    $answer = Read-InputOrDefault "  Inject host GitLab credentials (`$GITLAB_TOKEN + ~/.config/glab-cli) into the container? [Y/n]" "yes"
+    switch (($answer + '').ToLower()) {
+        'n'  { Set-ProfileConfValue 'INJECT_GITLAB_CREDS' 'no' }
+        'no' { Set-ProfileConfValue 'INJECT_GITLAB_CREDS' 'no' }
+        default { Set-ProfileConfValue 'INJECT_GITLAB_CREDS' 'yes' }
+    }
+}
+
 # --- Colori / output helpers ---------------------------------------------------
 function Write-Info    ($msg) { Write-Host "  $([char]0x25B8) $msg" -ForegroundColor Cyan    }
 function Write-Ok      ($msg) { Write-Host "  $([char]0x2714) $msg" -ForegroundColor Green   }
@@ -537,6 +558,9 @@ function Invoke-Init {
     Write-Host "    init-firewall.sh  <- official anthropics/claude-code" -ForegroundColor DarkGray
     Write-Host "    devcontainer.json <- customized (project name + config mounts)" -ForegroundColor DarkGray
 
+    # Chiedere preferenza iniezione credenziali GitLab (persistita per profilo)
+    Ensure-GitlabCredsChoice
+
     # Apply project-specific Dockerfile patches (idempotent, see README)
     Invoke-DockerfilePatches -ProjectRoot (Get-Location).Path
 
@@ -961,6 +985,9 @@ function Invoke-Start {
         if ($AutoYes) { $doUpdate = $false }
         else { $doUpdate = (Read-Host "  +- Update? [y/N]").ToLower() -eq 'y' }
     }
+
+    # Chiedere preferenza iniezione credenziali GitLab al primo start del profilo
+    Ensure-GitlabCredsChoice
 
     Write-Host ""
     Write-Host "  Current state:" -ForegroundColor DarkGray
