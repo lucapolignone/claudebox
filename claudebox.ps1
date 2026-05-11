@@ -527,7 +527,7 @@ function Invoke-Init {
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW"
   ],
-  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
+  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && mkdir -p /home/node/.config/glab-cli && if [ -d /host-glab-cli ]; then cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -710,6 +710,29 @@ function Invoke-Up {
         }
     }
 
+    # -- GitLab credentials injection (opt-in per-profile) ---------------------
+    $injectGlab = Get-ProfileConfValue 'INJECT_GITLAB_CREDS' 'no'
+    if ($injectGlab -eq 'yes') {
+        $glabDir = Join-Path $env:USERPROFILE ".config\glab-cli"
+        $hasDir   = Test-Path -LiteralPath $glabDir
+        $hasToken = -not [string]::IsNullOrEmpty($env:GITLAB_TOKEN)
+        if ($hasDir) {
+            # Docker Desktop su Windows accetta bind mount con sintassi POSIX
+            $glabDirDocker = $glabDir -replace '\\', '/'
+            $dockerExtraOpts += @('-v', "${glabDirDocker}:/host-glab-cli:ro")
+        }
+        if ($hasToken) {
+            $dockerExtraOpts += @('-e', "GITLAB_TOKEN=$env:GITLAB_TOKEN")
+        }
+        if ($hasDir -or $hasToken) {
+            $dirYn   = if ($hasDir)   { 'yes' } else { 'no' }
+            $tokenYn = if ($hasToken) { 'yes' } else { 'no' }
+            Write-Info "GitLab credentials injected (glab-cli config: $dirYn, GITLAB_TOKEN env: $tokenYn)"
+        } else {
+            Write-Warn "INJECT_GITLAB_CREDS=yes but neither `$GITLAB_TOKEN nor ~/.config/glab-cli/ available on host -- skipping"
+        }
+    }
+
     # -- Avvia container --------------------------------------------------------
     Write-Info "Starting container '$cname'..."
     docker run -d `
@@ -743,6 +766,11 @@ function Invoke-Up {
         # Copy ccstatusline config on first start
         docker exec -u root $cname chown -R node:node /home/node/.config/ccstatusline | Out-Null
         docker exec $cname bash -c 'mkdir -p /home/node/.config/ccstatusline && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' | Out-Null
+        # GitLab credentials post-start copy (safety-net per devcontainer.json
+        # generati da claudebox precedenti, che non hanno la copia in postStartCommand)
+        if ($injectGlab -eq 'yes') {
+            docker exec -u node $cname bash -c 'mkdir -p /home/node/.config/glab-cli && if [ -d /host-glab-cli ]; then cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; fi' 2>$null | Out-Null
+        }
         # Fix host paths -> container paths in Claude Code JSON config files
         # Written to a temp file and copied via docker cp to avoid all quote-stripping issues
         $fixJs = @'
