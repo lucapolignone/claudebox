@@ -123,6 +123,34 @@ profile_conf_set() {
     fi
 }
 
+# Chiede una volta sola se iniettare le credenziali GitLab dell'host e salva la
+# scelta nel file di config del profilo. Default = yes. In non-TTY (pipe/CI) o
+# con -y, salva il default senza prompt.
+ensure_gitlab_creds_choice() {
+    local current
+    current=$(profile_conf_get INJECT_GITLAB_CREDS)
+    if [ -n "$current" ]; then
+        return 0
+    fi
+
+    if [ ! -t 0 ]; then
+        profile_conf_set INJECT_GITLAB_CREDS yes
+        return 0
+    fi
+
+    # read_input_or_default rispetta gia' $AUTO_YES (vedi claudebox.sh:53)
+    local answer
+    answer=$(read_input_or_default \
+        "  Inject host GitLab credentials (\$GITLAB_TOKEN + ~/.config/glab-cli) into the container? [Y/n]: " \
+        "yes")
+    local lower
+    lower=$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        n|no) profile_conf_set INJECT_GITLAB_CREDS no ;;
+        *)    profile_conf_set INJECT_GITLAB_CREDS yes ;;
+    esac
+}
+
 # ── Colori ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -460,6 +488,9 @@ EOF
     ok "Generated .devcontainer/devcontainer.json (customized)"
     ok "Downloaded .devcontainer/Dockerfile (official Anthropic)"
     ok "Downloaded .devcontainer/init-firewall.sh (official Anthropic)"
+
+    # Chiedere preferenza iniezione credenziali GitLab (persistita per profilo)
+    ensure_gitlab_creds_choice
 
     # Apply project-specific Dockerfile patches (idempotent, see README)
     run_dockerfile_patches "$(pwd)"
@@ -852,6 +883,9 @@ cmd_start() {
             if [ "$_ans_lower" = "y" ]; then do_update=true; fi
         fi
     fi
+
+    # Chiedere preferenza iniezione credenziali GitLab al primo start del profilo
+    ensure_gitlab_creds_choice
 
     # Current state
     echo ""
