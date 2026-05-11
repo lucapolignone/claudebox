@@ -695,18 +695,6 @@ cmd_up() {
         fi
     fi
 
-    # GitLab credentials post-start copy (safety-net per devcontainer.json
-    # generati da claudebox precedenti, che non hanno la copia in postStartCommand).
-    # Idempotente: cp -rn no-clobber, e l'intero blocco e' eseguito solo se
-    # l'utente ha optato per l'iniezione.
-    if [ "${inject_glab:-no}" = "yes" ]; then
-        docker exec -u node "$cname" bash -c \
-            'mkdir -p /home/node/.config/glab-cli && \
-             if [ -d /host-glab-cli ]; then \
-                 cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; \
-             fi' >/dev/null 2>&1 || true
-    fi
-
     # Copy config on first start
     docker exec "$cname" bash -c \
         'sudo chown -R node:node /home/node/.claude /home/node/.config 2>/dev/null || true' >/dev/null
@@ -720,6 +708,15 @@ cmd_up() {
     docker exec -u root "$cname" chown -R node:node /home/node/.config/ccstatusline >/dev/null
     docker exec "$cname" bash -c \
         'if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' >/dev/null
+
+    # GitLab credentials post-start copy (safety-net per devcontainer.json
+    # generati da claudebox precedenti, che non hanno la copia in postStartCommand).
+    # Idempotente: cp -rn no-clobber. Posizionato dopo il chown di /home/node/.config
+    # cosi' la mkdir come utente node non fallisce su container appena creati.
+    if [ "${inject_glab:-no}" = "yes" ]; then
+        docker exec -u node "$cname" bash -c \
+            'mkdir -p /home/node/.config/glab-cli && if [ -d /host-glab-cli ]; then cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; fi' >/dev/null 2>&1 || true
+    fi
 
     # Fix host paths -> container paths in Claude Code JSON config files
     # Written to /tmp via heredoc to avoid single-quote issues in node -e
@@ -1024,9 +1021,15 @@ cmd_help() {
     stop      Stop the container (without removing it)
     destroy   Remove container, history volume and image
 
+  GITLAB CREDENTIALS
+    init/start chiede una volta sola se iniettare \$GITLAB_TOKEN e ~/.config/glab-cli
+    nel container. La scelta e' salvata per profilo in ~/.config/claudebox/<profilo>.conf
+    (chiave INJECT_GITLAB_CREDS=yes|no). Per cambiarla, edita quel file a mano.
+
   ENVIRONMENT VARIABLES
     CLAUDE_CONFIG_DIR         Claude Code config directory (default: ~/.claude)
     CCSTATUSLINE_CONFIG_DIR   ccstatusline config directory (default: ~/.config/ccstatusline)
+    GITLAB_TOKEN              GitLab personal access token (iniettato nel container se opt-in)
 
   FIRST RUN
     # Download and install (one-time):

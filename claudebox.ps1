@@ -1132,9 +1132,15 @@ function Show-Help {
     stop      Stop the container (without removing it)
     destroy   Remove container, history volume and image
 
+  GITLAB CREDENTIALS
+    init/start chiede una volta sola se iniettare `$GITLAB_TOKEN e ~/.config/glab-cli
+    nel container. La scelta e' salvata per profilo in ~/.config/claudebox/<profilo>.conf
+    (chiave INJECT_GITLAB_CREDS=yes|no). Per cambiarla, edita quel file a mano.
+
   ENVIRONMENT VARIABLES
     CLAUDE_CONFIG_DIR   Claude Code config directory
                         (default: ~\.claude if it exists)
+    GITLAB_TOKEN        GitLab personal access token (iniettato nel container se opt-in)
 
   FIRST RUN
     # Download and install (one-time):
