@@ -67,6 +67,62 @@ volume_suffix() {
     else echo "$prof"; fi
 }
 
+# ── Profile config (~/.config/claudebox/<profilo>.conf) ───────────────────────
+# Formato file: una riga per chiave nel formato KEY=value, niente apici, niente
+# commenti. Usato per persistere preferenze utente per-profilo (es. opt-in di
+# iniezione credenziali GitLab). File creato lazy alla prima scrittura.
+profile_conf_path() {
+    local prof="${1:-$PROFILE}"
+    echo "$HOME/.config/claudebox/${prof}.conf"
+}
+
+# profile_conf_get KEY [DEFAULT] -- stampa il valore della chiave o DEFAULT se
+# mancante. Silenzioso se il file non esiste o la chiave non e' definita.
+profile_conf_get() {
+    local key="$1" default="${2:-}"
+    local conf
+    conf="$(profile_conf_path)"
+    if [ ! -f "$conf" ]; then
+        printf '%s' "$default"
+        return 0
+    fi
+    local line
+    line=$(grep -E "^${key}=" "$conf" 2>/dev/null | head -1)
+    if [ -z "$line" ]; then
+        printf '%s' "$default"
+    else
+        # Strip "KEY=" prefix, mantieni il resto come valore
+        printf '%s' "${line#${key}=}"
+    fi
+}
+
+# profile_conf_set KEY VALUE -- crea dir+file se mancanti, sostituisce la
+# chiave esistente o appende. BSD vs GNU sed gestito esplicitamente (macOS).
+profile_conf_set() {
+    local key="$1" value="$2"
+    local conf
+    conf="$(profile_conf_path)"
+    local dir
+    dir="$(dirname "$conf")"
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        warn "Cannot create $dir, preference will not persist"
+        return 1
+    fi
+    if [ ! -f "$conf" ]; then
+        : > "$conf"
+    fi
+    if grep -qE "^${key}=" "$conf" 2>/dev/null; then
+        # Sostituzione in-place: gestire BSD (macOS) vs GNU sed
+        if sed --version 2>/dev/null | grep -q GNU; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$conf"
+        else
+            sed -i '' "s|^${key}=.*|${key}=${value}|" "$conf"
+        fi
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$conf"
+    fi
+}
+
 # ── Colori ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
