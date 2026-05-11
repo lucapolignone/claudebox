@@ -70,6 +70,47 @@ function Get-VolumeSuffix ([string]$prof) {
     return $prof
 }
 
+# --- Profile config (~/.config/claudebox/<profilo>.conf) -----------------------
+# Formato KEY=value, una chiave per riga, niente apici, niente commenti. Equiv.
+# delle funzioni bash profile_conf_* di claudebox.sh.
+function Get-ProfileConfPath ([string]$Prof = $script:Profile) {
+    if ([string]::IsNullOrEmpty($Prof)) { $Prof = 'personal' }
+    return Join-Path $env:USERPROFILE ".config\claudebox\$Prof.conf"
+}
+
+function Get-ProfileConfValue ([string]$Key, [string]$Default = '') {
+    $conf = Get-ProfileConfPath
+    if (-not (Test-Path -LiteralPath $conf)) { return $Default }
+    $line = Get-Content -LiteralPath $conf -Encoding UTF8 |
+        Where-Object { $_ -match "^$([regex]::Escape($Key))=" } |
+        Select-Object -First 1
+    if (-not $line) { return $Default }
+    return $line.Substring($Key.Length + 1)
+}
+
+function Set-ProfileConfValue ([string]$Key, [string]$Value) {
+    $conf = Get-ProfileConfPath
+    $dir  = Split-Path -Parent $conf
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        catch { Write-Warn "Cannot create $dir, preference will not persist"; return }
+    }
+    if (-not (Test-Path -LiteralPath $conf)) {
+        Set-Content -LiteralPath $conf -Value '' -Encoding UTF8 -NoNewline
+    }
+    $lines = @(Get-Content -LiteralPath $conf -Encoding UTF8)
+    $pattern = "^$([regex]::Escape($Key))="
+    $found = $false
+    $newLines = $lines | ForEach-Object {
+        if ($_ -match $pattern) { $found = $true; "$Key=$Value" } else { $_ }
+    }
+    if (-not $found) { $newLines = @($newLines | Where-Object { $_ -ne '' }) + "$Key=$Value" }
+    # LF line endings, UTF-8 no BOM
+    $body = ($newLines -join "`n") + "`n"
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+    [System.IO.File]::WriteAllBytes($conf, $bytes)
+}
+
 # --- Colori / output helpers ---------------------------------------------------
 function Write-Info    ($msg) { Write-Host "  $([char]0x25B8) $msg" -ForegroundColor Cyan    }
 function Write-Ok      ($msg) { Write-Host "  $([char]0x2714) $msg" -ForegroundColor Green   }
