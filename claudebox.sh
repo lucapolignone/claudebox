@@ -466,7 +466,7 @@ cmd_init() {
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW"
   ],
-  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
+  "postStartCommand": "sudo chown -R node:node /home/node/.claude /home/node/.config && mkdir -p /home/node/.local/bin /home/node/.config/ccstatusline /home/node/.claude/plugins && if [ ! -f /home/node/.claude/.credentials.json ]; then cp -rn /host-claude/. /home/node/.claude/ 2>/dev/null || true; fi && cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true && if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi && mkdir -p /home/node/.config/glab-cli && if [ -d /host-glab-cli ]; then cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; fi && sudo /usr/local/bin/init-firewall.sh 2>/dev/null || true",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -621,6 +621,30 @@ cmd_up() {
         fi
     fi
 
+    # GitLab credentials injection (opt-in per-profile, see profile conf)
+    local inject_glab
+    inject_glab=$(profile_conf_get INJECT_GITLAB_CREDS no)
+    if [ "$inject_glab" = "yes" ]; then
+        local glab_dir="$HOME/.config/glab-cli"
+        local has_dir=0 has_token=0
+        if [ -d "$glab_dir" ]; then
+            docker_extra_opts+=( -v "${glab_dir}:/host-glab-cli:ro" )
+            has_dir=1
+        fi
+        if [ -n "${GITLAB_TOKEN:-}" ]; then
+            docker_extra_opts+=( -e "GITLAB_TOKEN=${GITLAB_TOKEN}" )
+            has_token=1
+        fi
+        if [ "$has_dir" = "1" ] || [ "$has_token" = "1" ]; then
+            local _hd _ht
+            [ "$has_dir"   = "1" ] && _hd=yes || _hd=no
+            [ "$has_token" = "1" ] && _ht=yes || _ht=no
+            info "GitLab credentials injected (glab-cli config: $_hd, GITLAB_TOKEN env: $_ht)"
+        else
+            warn "INJECT_GITLAB_CREDS=yes but neither \$GITLAB_TOKEN nor ~/.config/glab-cli/ available on host — skipping"
+        fi
+    fi
+
     # Start container
     info "Starting container '$cname'..."
     docker run -d \
@@ -669,6 +693,18 @@ cmd_up() {
             warn "Could not align docker.sock group inside container."
             warn "Inside the container, run: sudo chgrp docker /var/run/docker.sock && sudo chmod 660 /var/run/docker.sock"
         fi
+    fi
+
+    # GitLab credentials post-start copy (safety-net per devcontainer.json
+    # generati da claudebox precedenti, che non hanno la copia in postStartCommand).
+    # Idempotente: cp -rn no-clobber, e l'intero blocco e' eseguito solo se
+    # l'utente ha optato per l'iniezione.
+    if [ "${inject_glab:-no}" = "yes" ]; then
+        docker exec -u node "$cname" bash -c \
+            'mkdir -p /home/node/.config/glab-cli && \
+             if [ -d /host-glab-cli ]; then \
+                 cp -rn /host-glab-cli/. /home/node/.config/glab-cli/ 2>/dev/null || true; \
+             fi' >/dev/null 2>&1 || true
     fi
 
     # Copy config on first start
