@@ -19,6 +19,7 @@ patches/                template di patch da copiare nei progetti target
   patch-dockerfile-docker.{sh,ps1}    Docker CLI + buildx + compose (DooD)
   patch-dockerfile-glab.{sh,ps1}      GitLab CLI 'glab'
   patch-dockerfile-java.{sh,ps1}      Eclipse Temurin 21 + Maven
+  patch-dockerfile-playwright.{sh,ps1} Playwright (Node) + browser headless + apt deps
   patch-dockerfile-uvx.{sh,ps1}       uv + uvx (Astral)
   patch-dockerfile.{sh,ps1}           project-specific (PHP + rete yougo-dev)
 README.md               documentazione utente
