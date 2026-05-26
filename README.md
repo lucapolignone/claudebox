@@ -149,6 +149,37 @@ UV_VERSION=0.11.8 ./patch-dockerfile-uvx.sh patch
 
 Comandi: `patch` (default), `remove`, `status`, `help`.
 
+### `patch-dockerfile-playwright.sh` — Playwright (Node) + browser headless
+
+Aggiunge [Playwright](https://playwright.dev) per test E2E con tutti e tre i browser supportati e tutte le dipendenze apt di sistema. Patch riusabile, scopribile da entrambe le location.
+
+Installa:
+
+- **`@playwright/test`** — CLI Playwright globale via `npm install -g`
+- **Browser**: chromium, firefox, webkit (in `/ms-playwright`, cache system-wide condivisa fra `root` e `node`)
+- **Dipendenze apt** di sistema: `libnss3`, `libgbm`, font, ecc. — installate via `npx playwright install --with-deps`
+
+```bash
+# Dentro al container
+npx playwright --version
+npx playwright test         # esegue i test
+npx playwright codegen      # genera codice da interazioni browser
+```
+
+Variabili d'ambiente settate dal patch:
+
+- `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` — cache system-wide, condivisa fra utenti (convenzione ufficiale Playwright per Docker)
+
+Override versione:
+
+```bash
+PLAYWRIGHT_VERSION=1.49.0 ./patch-dockerfile-playwright.sh patch
+```
+
+> **Nota dimensioni**: aggiunge ~700 MB all'immagine finale (browser + apt deps). Se ti serve solo un sottoinsieme dei browser oggi non c'è un flag per limitarlo — la patch installa tutti e tre.
+
+Comandi: `patch` (default), `remove`, `status`, `help`.
+
 ### `patch-dockerfile.sh` — PHP 8 + Composer + rete `yougo-dev`
 
 Patch **project-specific per yougo-dev**. Vive in project root (usa `DOCKERFILE=".devcontainer/Dockerfile"`). Installa:
@@ -398,6 +429,8 @@ Stai lanciando claudebox dall'interno della cartella `.devcontainer/`. Il nome d
 │   ├── patch-dockerfile-docker.ps1     <- idem per Windows
 │   ├── patch-dockerfile-java.sh        <- patch riusabile (Java 21 + Maven)
 │   ├── patch-dockerfile-java.ps1       <- idem per Windows
+│   ├── patch-dockerfile-playwright.sh  <- patch riusabile (Playwright + browser)
+│   ├── patch-dockerfile-playwright.ps1 <- idem per Windows
 │   ├── patch-dockerfile-uvx.sh         <- patch riusabile (uv + uvx)
 │   ├── patch-dockerfile-uvx.ps1        <- idem per Windows
 │   ├── patch-dockerfile.sh             <- patch project-specific (PHP + rete yougo-dev)
