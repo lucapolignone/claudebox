@@ -1011,6 +1011,62 @@ cmd_destroy() {
     echo "    docker volume rm claudebox-shared-config claudebox-shared-ccstatusline"
 }
 
+# ── JSON HELPERS ─────────────────────────────────────────────────────────────────
+# json_string STR -- sfugge \ e " cosi' che STR sia sicuro dentro un valore
+# JSON tra virgolette. L'ordine conta: si sfugge prima il backslash, altrimenti
+# il backslash appena inserito davanti alle virgolette verrebbe sfuggito a sua
+# volta ("doppia fuga").
+json_string() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# ── INFO ────────────────────────────────────────────────────────────────────────
+# Dice cio' che claudebox sa di un progetto, senza che nessun altro programma
+# debba indovinarlo (nome sanificato, nome container, volume, cartella...).
+# Con --json stampa SOLO JSON su stdout: nessun banner, nessun messaggio --
+# quelli, se servissero, andrebbero su stderr. Legge solo, non tocca Docker.
+cmd_info() {
+    local json_mode=false
+    for arg in "$@"; do
+        [ "$arg" = "--json" ] && json_mode=true
+    done
+
+    local proj cname img vol workspace exists running
+    proj="$(project_name)"
+    cname="$(container_name)"
+    img="claudebox-img-$proj"
+    vol="claudebox-${proj}-history"
+    workspace="$(pwd)"
+    container_exists  && exists=true  || exists=false
+    container_running && running=true || running=false
+
+    if $json_mode; then
+        printf '{\n'
+        printf '  "progetto":  "%s",\n' "$(json_string "$proj")"
+        printf '  "profilo":   "%s",\n' "$(json_string "$PROFILE")"
+        printf '  "container": "%s",\n' "$(json_string "$cname")"
+        printf '  "immagine":  "%s",\n' "$(json_string "$img")"
+        printf '  "volume":    "%s",\n' "$(json_string "$vol")"
+        printf '  "workspace": "%s",\n' "$(json_string "$workspace")"
+        printf '  "esiste":    %s,\n' "$exists"
+        printf '  "acceso":    %s\n' "$running"
+        printf '}\n'
+    else
+        header "=== claudebox info ==="
+        echo "  Progetto  : $proj"
+        echo "  Profilo   : $PROFILE"
+        echo "  Container : $cname"
+        echo "  Immagine  : $img"
+        echo "  Volume    : $vol"
+        echo "  Workspace : $workspace"
+        echo "  Esiste    : $exists"
+        echo "  Acceso    : $running"
+    fi
+}
+
 # ── HELP ────────────────────────────────────────────────────────────────────────
 cmd_help() {
     cat <<HELP
@@ -1071,6 +1127,7 @@ case "$_cmd" in
     shell)   cmd_shell   ;;
     stop)    cmd_stop    ;;
     destroy) cmd_destroy ;;
+    info)    cmd_info "$@" ;;
     help|--help|-h) cmd_help ;;
     *) cmd_help ;;
 esac

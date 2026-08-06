@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install','init','up','start','update','shell','stop','destroy','help','')]
+    [ValidateSet('install','init','up','start','update','shell','stop','destroy','info','help','')]
     [string]$Command = '',
 
     [Parameter()]
@@ -41,7 +41,11 @@ param(
 
     [Parameter()]
     [Alias('n')]
-    [switch]$NoUpdate
+    [switch]$NoUpdate,
+
+    # Usato da 'info': stampa solo JSON su stdout (vedi Invoke-Info)
+    [Parameter()]
+    [switch]$Json
 )
 
 Set-StrictMode -Version Latest
@@ -1119,6 +1123,50 @@ function Invoke-Destroy {
     Write-Host "    docker volume rm claudebox-shared-config" -ForegroundColor DarkGray
 }
 
+# --- INFO ------------------------------------------------------------------
+# Dice cio' che claudebox sa di un progetto, senza che nessun altro programma
+# debba indovinarlo (nome sanificato, nome container, volume, cartella...).
+# Con -Json stampa SOLO JSON sullo stream di output (equivalente PowerShell di
+# stdout): nessun banner, nessun messaggio -- quelli, se servissero, vanno su
+# Write-Host/Write-Warning/Write-Error, che non finiscono nello stesso stream.
+# Usa ConvertTo-Json invece di comporre la stringa a mano: e' piu' sicuro.
+# Legge solo, non tocca Docker se non per le due query read-only.
+function Invoke-Info {
+    $proj      = Get-ProjectName
+    $cname     = Get-ContainerName
+    $img       = "claudebox-img-$proj"
+    $vol       = "claudebox-${proj}-history"
+    $workspace = (Get-Location).Path
+    $exists    = Test-ContainerExists
+    $running   = Test-ContainerRunning
+
+    if ($Json) {
+        # [pscustomobject] con hashtable letterale preserva l'ordine di
+        # inserimento (a differenza di una hashtable normale): necessario per
+        # rispettare l'ordine dei campi del contratto.
+        [pscustomobject]@{
+            progetto  = $proj
+            profilo   = $Profile
+            container = $cname
+            immagine  = $img
+            volume    = $vol
+            workspace = $workspace
+            esiste    = [bool]$exists
+            acceso    = [bool]$running
+        } | ConvertTo-Json
+    } else {
+        Write-Header "=== claudebox info ==="
+        Write-Host "  Progetto  : $proj"
+        Write-Host "  Profilo   : $Profile"
+        Write-Host "  Container : $cname"
+        Write-Host "  Immagine  : $img"
+        Write-Host "  Volume    : $vol"
+        Write-Host "  Workspace : $workspace"
+        Write-Host "  Esiste    : $exists"
+        Write-Host "  Acceso    : $running"
+    }
+}
+
 # --- HELP ----------------------------------------------------------------------
 function Show-Help {
     Write-Host @"
@@ -1182,5 +1230,6 @@ switch ($Command) {
     'shell'   { Invoke-Shell   }
     'stop'    { Invoke-Stop    }
     'destroy' { Invoke-Destroy }
+    'info'    { Invoke-Info    }
     default   { Show-Help      }
 }
