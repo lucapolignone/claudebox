@@ -43,9 +43,14 @@ param(
     [Alias('n')]
     [switch]$NoUpdate,
 
-    # Usato da 'info': stampa solo JSON su stdout (vedi Invoke-Info)
+    # Usato da 'info' e 'ls': stampa solo JSON su stdout (vedi Invoke-Info, Invoke-Ls)
     [Parameter()]
-    [switch]$Json
+    [switch]$Json,
+
+    # Usato da 'up': tutto il lavoro di preparazione gira, ma niente
+    # aggancio interattivo finale (vedi Invoke-Up)
+    [Parameter()]
+    [switch]$Detach
 )
 
 Set-StrictMode -Version Latest
@@ -898,6 +903,20 @@ chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
         Write-Err "Isolation NOT verified: pwd = '$workdir' (expected /workspace)"
     }
 
+    # -- Detach: tutto quello che serve per rendere il container utilizzabile
+    # e' gia' girato sopra (build, run, firewall, chown, credenziali,
+    # correzione dei percorsi, verifica isolamento). Ci si ferma qui, PRIMA
+    # dell'aggancio interattivo che segue -- quello non parte mai con
+    # -Detach. Uscita 0 solo se il container e' davvero acceso.
+    if ($Detach) {
+        if (Test-ContainerRunning) {
+            Write-Ok "Container '$cname' is up (-Detach, no interactive attach)."
+            exit 0
+        } else {
+            Write-Err "Container '$cname' non risulta acceso dopo l'avvio (-Detach)."
+        }
+    }
+
     # -- Lancio Claude Code interattivo -----------------------------------------
     if ($isNewProfile) {
         Write-Header "=== First login for profile '$Profile' ==="
@@ -915,6 +934,15 @@ chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
         docker exec -it -u node `
             -e CLAUDE_CODE_NO_FLICKER=1 `
             $cname zsh -c 'claude --dangerously-skip-permissions; exec zsh'
+    }
+
+    # Parita' con bash: se l'aggancio interattivo fallisce (es. nessun tty
+    # disponibile, il caso per cui esiste -Detach), lo script deve uscire
+    # non-zero -- esattamente come gia' fa claudebox.sh, dove 'set -e' rende
+    # fatale il fallimento del 'docker exec -it' finale. PowerShell non lo fa
+    # da solo per un comando nativo: bisogna controllare $LASTEXITCODE.
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "L'aggancio interattivo a claude e' fallito (exit $LASTEXITCODE)."
     }
 }
 

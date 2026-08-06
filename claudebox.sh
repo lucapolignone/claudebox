@@ -20,13 +20,18 @@ set -euo pipefail
 
 # -y / --yes flag: skip all confirmation prompts
 # --no-update / -n flag: skip automatic Claude Code update on container start
+# --detach flag: 'up' fa tutto il lavoro di preparazione ma si ferma prima
+# dell'aggancio interattivo finale (vedi cmd_up). 'start' non lo eredita
+# ancora -- e' lavoro successivo, non di questo commit.
 AUTO_YES=false
 NO_UPDATE=false
+DETACH=false
 PROFILE='personal'
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=true ;;
         -n|--no-update) NO_UPDATE=true ;;
+        --detach) DETACH=true ;;
         -p|--profile) : ;; # handled below with shift
     esac
 done
@@ -810,6 +815,20 @@ JSEOF
         ok "Isolation confirmed: pwd = /workspace"
     else
         err "Isolation NOT verified: pwd = '$workdir' (expected /workspace)"
+    fi
+
+    # --detach: tutto quello che serve per rendere il container utilizzabile
+    # e' gia' girato sopra (build, run, firewall, chown, credenziali,
+    # correzione dei percorsi, verifica isolamento). Ci si ferma qui, PRIMA
+    # dell'aggancio interattivo che segue -- quello non parte mai con
+    # --detach. Uscita 0 solo se il container e' davvero acceso.
+    if $DETACH; then
+        if container_running; then
+            ok "Container '$cname' is up (--detach, no interactive attach)."
+            return 0
+        else
+            err "Container '$cname' non risulta acceso dopo l'avvio (--detach)."
+        fi
     fi
 
     # Launch Claude Code
