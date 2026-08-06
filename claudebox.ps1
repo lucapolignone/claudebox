@@ -1127,8 +1127,16 @@ function Invoke-Destroy {
 # Dice cio' che claudebox sa di un progetto, senza che nessun altro programma
 # debba indovinarlo (nome sanificato, nome container, volume, cartella...).
 # Con -Json stampa SOLO JSON sullo stream di output (equivalente PowerShell di
-# stdout): nessun banner, nessun messaggio -- quelli, se servissero, vanno su
-# Write-Host/Write-Warning/Write-Error, che non finiscono nello stesso stream.
+# stdout): nessun banner, nessun messaggio.
+# ATTENZIONE, provato da chiamante esterno (subprocess con gli stream
+# rediretti, com'e' un programma .NET che invoca questo script): sia
+# Write-Host che Write-Warning finiscono comunque su fd 1 (stdout) --
+#   pwsh -Command 'Write-Host "X"'    -> "X" su fd 1
+#   pwsh -Command 'Write-Warning "Y"' -> "WARNING: Y" su fd 1
+# Solo Write-Error scrive davvero su fd 2 (stderr) in queste condizioni.
+# Quindi in modalita' -Json non si puo' scrivere nient'altro che il JSON:
+# se in futuro serve un avviso in questo ramo, l'unico modo stream-safe per
+# dirlo e' Write-Error.
 # Usa ConvertTo-Json invece di comporre la stringa a mano: e' piu' sicuro.
 # Legge solo, non tocca Docker se non per le due query read-only.
 function Invoke-Info {

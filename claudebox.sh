@@ -180,8 +180,19 @@ _resolve_path() {
     fi
 }
 
+# FIX: sed e' line-oriented -- un newline letterale nel nome della cartella
+# (legale su Linux/macOS) attraversa 's/[^a-z0-9_-]/-/g' intatto, perche' il
+# newline e' il separatore di riga per sed, mai un carattere del pattern
+# space che quella sostituzione possa vedere. Lo convertiamo in '-' PRIMA di
+# sed (un tr, che lavora byte per byte e non per riga, lo vede benissimo),
+# cosi' anche una cartella con un a capo nel nome produce un project_name --
+# e quindi nome container/immagine/volume -- su una sola riga, sano per
+# Docker e per il JSON di 'info'. Allinea project_name() a Get-ProjectName in
+# claudebox.ps1, la cui regex .NET su [^a-zA-Z0-9_\-] gia' considera il
+# newline un carattere come un altro: stesso nome sanificato, non solo JSON
+# valido in entrambi i casi.
 project_name() {
-    basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//'
+    basename "$(pwd)" | tr '\n' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//'
 }
 
 # Il nome del container include il profilo (tranne 'personal', per retrocompatibilita')
@@ -1016,11 +1027,33 @@ cmd_destroy() {
 # JSON tra virgolette. L'ordine conta: si sfugge prima il backslash, altrimenti
 # il backslash appena inserito davanti alle virgolette verrebbe sfuggito a sua
 # volta ("doppia fuga").
+#
+# Sfugge anche i caratteri di controllo C0 (0x00-0x1F): 'workspace' viene dal
+# percorso reale della cartella ($(pwd)), che a differenza di project_name()
+# non e' sanificato -- e su Linux/macOS un newline (o un tab, o un qualsiasi
+# controllo) nel nome di una cartella e' legale. Senza questo, un simile
+# nome romperebbe il JSON prodotto (provato: "Invalid control character").
+# \n, \r, \t hanno una forma corta leggibile; il resto del range C0 diventa
+# \u00XX secondo RFC 8259. Non serve gestire NUL (0x00): una stringa bash
+# non puo' contenerlo.
 json_string() {
     local s="$1"
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
-    printf '%s' "$s"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    local out='' i n c ord
+    n=${#s}
+    for ((i = 0; i < n; i++)); do
+        c="${s:i:1}"
+        ord=$(printf '%d' "'$c")
+        if (( ord >= 0 && ord < 32 )); then
+            printf -v c '\\u%04x' "$ord"
+        fi
+        out+="$c"
+    done
+    printf '%s' "$out"
 }
 
 # ── INFO ────────────────────────────────────────────────────────────────────────
