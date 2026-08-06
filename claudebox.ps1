@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install','init','up','start','update','shell','stop','destroy','info','help','')]
+    [ValidateSet('install','init','up','start','update','shell','stop','destroy','info','ls','help','')]
     [string]$Command = '',
 
     [Parameter()]
@@ -1175,6 +1175,117 @@ function Invoke-Info {
     }
 }
 
+# --- LS ----------------------------------------------------------------------
+# Elenca tutti i container claudebox della macchina, uno per sandbox. La
+# scoperta e' per PREFISSO del nome ('claudebox-'), non per etichetta:
+# filtrare per label=claudebox.project sembrerebbe piu' pulito ma farebbe
+# sparire dall'elenco ogni container creato prima di questo lavoro, che
+# etichette non ne ha mai avute. Il prefisso li trova tutti; le etichette,
+# quando ci sono, riempiono i campi che dal nome non si possono ricavare.
+function Invoke-Ls {
+    $names = @(docker ps -a --filter 'name=^claudebox-' --format '{{.Names}}' 2>$null |
+        Where-Object { $_ -ne '' })
+
+    if ($names.Count -eq 0) {
+        if ($Json) {
+            '[]'
+        } else {
+            Write-Header "=== claudebox ls ==="
+            Write-Host "  Nessun container claudebox su questa macchina."
+        }
+        return
+    }
+
+    # Un solo 'docker inspect' per TUTTI i container, non uno a testa: si
+    # sente su una macchina con dieci sandbox. A differenza di claudebox.sh,
+    # qui non serve un delimitatore artigianale: '{{json .}}' fa emettere a
+    # Go un oggetto JSON per riga, gia' correttamente sfuggito (tab, a capo,
+    # virgolette dentro un valore restano dentro quella riga, come stringa
+    # JSON) -- ConvertFrom-Json fa il resto.
+    $rawLines = docker inspect --format '{{json .}}' $names 2>$null
+
+    $items = @()
+    foreach ($line in $rawLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $obj = $line | ConvertFrom-Json
+        $cname = $obj.Name -replace '^/', ''
+        $labels = $obj.Config.Labels
+
+        # Un container senza etichette ha comunque un oggetto Labels (vuoto,
+        # '{}'), non $null -- e con Set-StrictMode attivo (vedi inizio file)
+        # '$labels.foo' su una proprieta' che non esiste e' un errore
+        # fatale, non silenziosamente $null. .PSObject.Properties[key] invece
+        # restituisce $null quando la chiave manca, senza eccezioni.
+        $plabel = $null; $proflabel = $null; $wslabel = $null
+        if ($labels) {
+            $p = $labels.PSObject.Properties['claudebox.project'];    if ($p) { $plabel    = $p.Value }
+            $p = $labels.PSObject.Properties['claudebox.profile'];    if ($p) { $proflabel = $p.Value }
+            $p = $labels.PSObject.Properties['claudebox.workspace'];  if ($p) { $wslabel   = $p.Value }
+        }
+
+        if ($plabel) {
+            # Etichettato (le tre label si mettono sempre insieme, vedi
+            # Task 1): niente da indovinare.
+            $proj      = $plabel
+            $prof      = $proflabel
+            $workspace = $wslabel
+        } else {
+            # Container precedente a questo lavoro, senza etichette. Si
+            # deduce dal nome solo cio' che e' davvero inequivocabile:
+            # Get-ContainerName produce "claudebox-<progetto>" quando il
+            # profilo e' 'personal', e "claudebox-<progetto>-<profilo>"
+            # altrimenti. Un resto SENZA trattini interni puo' venire solo
+            # dal primo caso (un progetto senza trattini suoi, profilo
+            # 'personal'): l'unica deduzione che non e' una scommessa. Un
+            # resto CON trattini e' strutturalmente ambiguo -- potrebbe
+            # essere un progetto con trattini suoi, o un progetto piu' un
+            # suffisso profilo -- e non c'e' modo di saperlo dal nome
+            # soltanto: profilo resta null, progetto e' il resto per intero.
+            $rest = $cname -replace '^claudebox-', ''
+            $proj = $rest
+            if ($rest -match '-') { $prof = $null } else { $prof = 'personal' }
+            $workspace = $null
+        }
+
+        $historyVol = $null
+        foreach ($m in $obj.Mounts) {
+            if ($m.Destination -eq '/commandhistory') { $historyVol = $m.Name; break }
+        }
+        $image = $obj.Config.Image
+        if ([string]::IsNullOrEmpty($image)) { $image = $null }
+
+        $items += [pscustomobject]@{
+            progetto  = $proj
+            profilo   = $prof
+            container = $cname
+            immagine  = $image
+            volume    = $historyVol
+            workspace = $workspace
+            esiste    = $true
+            acceso    = [bool]($obj.State.Running)
+        }
+    }
+
+    if ($Json) {
+        # -AsArray e' necessario: senza, un elenco di un solo elemento
+        # serializzerebbe come oggetto singolo invece che come array di un
+        # elemento -- il difetto che si vede solo su una macchina con una
+        # sola sandbox.
+        $items | ConvertTo-Json -AsArray
+    } else {
+        Write-Header "=== claudebox ls ==="
+        foreach ($it in $items) {
+            Write-Host "  - $($it.container)"
+            Write-Host "      Progetto  : $($it.progetto)"
+            Write-Host "      Profilo   : $(if ($it.profilo) { $it.profilo } else { '(sconosciuto)' })"
+            Write-Host "      Immagine  : $(if ($it.immagine) { $it.immagine } else { '(sconosciuta)' })"
+            Write-Host "      Volume    : $(if ($it.volume) { $it.volume } else { '(sconosciuto)' })"
+            Write-Host "      Workspace : $(if ($it.workspace) { $it.workspace } else { '(sconosciuto)' })"
+            Write-Host "      Acceso    : $($it.acceso)"
+        }
+    }
+}
+
 # --- HELP ----------------------------------------------------------------------
 function Show-Help {
     Write-Host @"
@@ -1239,5 +1350,6 @@ switch ($Command) {
     'stop'    { Invoke-Stop    }
     'destroy' { Invoke-Destroy }
     'info'    { Invoke-Info    }
+    'ls'      { Invoke-Ls      }
     default   { Show-Help      }
 }

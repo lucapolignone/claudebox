@@ -1100,6 +1100,149 @@ cmd_info() {
     fi
 }
 
+# ── LS ──────────────────────────────────────────────────────────────────────────
+# _ls_emit JSON_MODE SEP NAME RUNNING PROJECT_LABEL PROFILE_LABEL WORKSPACE_LABEL IMAGE HISTORY_VOL
+# Stampa un elemento dell'elenco di cmd_ls (un oggetto JSON dell'array, o una
+# voce leggibile). E' una funzione a se' perche' viene invocata una volta per
+# record durante la lettura NUL-delimited dell'unico 'docker inspect' (vedi
+# cmd_ls). SEP e' '' per il primo elemento, ',\n' per i successivi.
+_ls_emit() {
+    local json_mode="$1" sep="$2" name="$3" running="$4"
+    local plabel="$5" proflabel="$6" wslabel="$7" image="$8" history="$9"
+    local cname proj prof workspace acceso
+
+    cname="${name#/}"
+
+    if [ -n "$plabel" ]; then
+        # Etichettato (le tre label si mettono sempre insieme, vedi Task 1):
+        # niente da indovinare.
+        proj="$plabel"
+        prof="$proflabel"
+        workspace="$wslabel"
+    else
+        # Container precedente a questo lavoro, senza etichette. Si deduce
+        # dal nome solo cio' che e' davvero inequivocabile: container_name()
+        # produce "claudebox-<progetto>" quando il profilo e' 'personal', e
+        # "claudebox-<progetto>-<profilo>" altrimenti. Un resto SENZA trattini
+        # interni puo' venire solo dal primo caso (un progetto senza trattini
+        # suoi, profilo 'personal'): l'unica deduzione che non e' una
+        # scommessa. Un resto CON trattini e' strutturalmente ambiguo -- puo'
+        # essere un progetto con trattini suoi, o un progetto piu' un
+        # suffisso profilo -- e non c'e' modo di saperlo dal nome soltanto:
+        # profilo resta null, progetto e' il resto per intero (il meglio che
+        # si puo' fare senza indovinare quale pezzo sia quale).
+        local rest="${cname#claudebox-}"
+        proj="$rest"
+        case "$rest" in
+            *-*) prof='' ;;
+            *)   prof='personal' ;;
+        esac
+        workspace=''
+    fi
+
+    if [ "$running" = "true" ]; then acceso=true; else acceso=false; fi
+
+    if $json_mode; then
+        printf '%s  {\n' "$sep"
+        printf '    "progetto":  "%s",\n' "$(json_string "$proj")"
+        if [ -n "$prof" ]; then printf '    "profilo":   "%s",\n' "$(json_string "$prof")"
+        else printf '    "profilo":   null,\n'; fi
+        printf '    "container": "%s",\n' "$(json_string "$cname")"
+        if [ -n "$image" ]; then printf '    "immagine":  "%s",\n' "$(json_string "$image")"
+        else printf '    "immagine":  null,\n'; fi
+        if [ -n "$history" ]; then printf '    "volume":    "%s",\n' "$(json_string "$history")"
+        else printf '    "volume":    null,\n'; fi
+        if [ -n "$workspace" ]; then printf '    "workspace": "%s",\n' "$(json_string "$workspace")"
+        else printf '    "workspace": null,\n'; fi
+        printf '    "esiste":    true,\n'
+        printf '    "acceso":    %s\n' "$acceso"
+        printf '  }'
+    else
+        echo "  - $cname"
+        echo "      Progetto  : $proj"
+        echo "      Profilo   : ${prof:-(sconosciuto)}"
+        echo "      Immagine  : ${image:-(sconosciuta)}"
+        echo "      Volume    : ${history:-(sconosciuto)}"
+        echo "      Workspace : ${workspace:-(sconosciuto)}"
+        echo "      Acceso    : $acceso"
+    fi
+}
+
+# Elenca tutti i container claudebox della macchina, uno per sandbox. La
+# scoperta e' per PREFISSO del nome ('claudebox-'), non per etichetta:
+# filtrare per label=claudebox.project sembrerebbe piu' pulito ma farebbe
+# sparire dall'elenco ogni container creato prima di questo lavoro, che
+# etichette non ne ha mai avute. Il prefisso li trova tutti; le etichette,
+# quando ci sono, riempiono i campi che dal nome non si possono ricavare.
+cmd_ls() {
+    local json_mode=false
+    for arg in "$@"; do
+        [ "$arg" = "--json" ] && json_mode=true
+    done
+
+    local names_raw
+    names_raw=$(docker ps -a --filter 'name=^claudebox-' --format '{{.Names}}' 2>/dev/null)
+
+    if [ -z "$names_raw" ]; then
+        if $json_mode; then
+            printf '[]\n'
+        else
+            header "=== claudebox ls ==="
+            echo "  Nessun container claudebox su questa macchina."
+        fi
+        return 0
+    fi
+
+    local -a cnames=()
+    while IFS= read -r n; do
+        [ -n "$n" ] && cnames+=("$n")
+    done <<< "$names_raw"
+
+    # Un solo 'docker inspect' per TUTTI i container, non uno a testa: si
+    # sente su una macchina con dieci sandbox. Il template usa \u0000 come
+    # separatore di campo E di record -- l'unico byte che non puo' comparire
+    # in nessuno dei valori (percorsi, nomi, label): un separatore stampabile
+    # si romperebbe su un workspace con un tab o un a capo dentro (lo stesso
+    # caso per cui json_string() sfugge i controlli C0).
+    local fmt
+    fmt='{{.Name}}{{"\u0000"}}{{.State.Running}}{{"\u0000"}}{{index .Config.Labels "claudebox.project"}}{{"\u0000"}}{{index .Config.Labels "claudebox.profile"}}{{"\u0000"}}{{index .Config.Labels "claudebox.workspace"}}{{"\u0000"}}{{.Config.Image}}{{"\u0000"}}{{range .Mounts}}{{if eq .Destination "/commandhistory"}}{{.Name}}{{end}}{{end}}{{"\u0000"}}'
+
+    $json_mode && printf '[\n'
+    $json_mode || header "=== claudebox ls ==="
+
+    local field_idx=0 sep=''
+    local f_name f_running f_project f_profile f_workspace f_image f_history
+    while IFS= read -r -d '' field; do
+        case $(( field_idx % 7 )) in
+            0)
+                # 'docker inspect --format' con piu' nomi aggiunge un \n suo
+                # dopo l'output di OGNI oggetto, oltre al nostro NUL
+                # esplicito -- verificato con 'od -c'. Quel \n finisce quindi
+                # incollato davanti al primo campo del record successivo (il
+                # nostro delimitatore vede solo NUL, non \n). Un nome
+                # container vero non inizia mai per \n, quindi va tolto se
+                # presente: e' rumore di docker, non parte del valore.
+                f_name="${field#$'\n'}"
+                ;;
+            1) f_running="$field" ;;
+            2) f_project="$field" ;;
+            3) f_profile="$field" ;;
+            4) f_workspace="$field" ;;
+            5) f_image="$field" ;;
+            6)
+                f_history="$field"
+                _ls_emit "$json_mode" "$sep" "$f_name" "$f_running" \
+                    "$f_project" "$f_profile" "$f_workspace" "$f_image" "$f_history"
+                sep=$',\n'
+                ;;
+        esac
+        field_idx=$((field_idx + 1))
+    done < <(docker inspect --format "$fmt" "${cnames[@]}" 2>/dev/null)
+
+    $json_mode && printf '\n]\n'
+    return 0
+}
+
 # ── HELP ────────────────────────────────────────────────────────────────────────
 cmd_help() {
     cat <<HELP
@@ -1161,6 +1304,7 @@ case "$_cmd" in
     stop)    cmd_stop    ;;
     destroy) cmd_destroy ;;
     info)    cmd_info "$@" ;;
+    ls)      cmd_ls "$@"   ;;
     help|--help|-h) cmd_help ;;
     *) cmd_help ;;
 esac
