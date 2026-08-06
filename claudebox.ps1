@@ -734,11 +734,17 @@ function Invoke-Up {
     }
 
     # -- Avvia container --------------------------------------------------------
+    # $currentDir e' gia' calcolato una volta sopra (percorso assoluto nativo
+    # Windows): lo riusiamo qui per la label claudebox.workspace, invece di
+    # ricalcolarlo inline dentro le righe di continuazione del docker run.
     Write-Info "Starting container '$cname'..."
     docker run -d `
         --name $cname `
         --cap-add=NET_ADMIN `
         --cap-add=NET_RAW `
+        --label "claudebox.project=$proj" `
+        --label "claudebox.profile=$Profile" `
+        --label "claudebox.workspace=$currentDir" `
         @dockerExtraOpts `
         -v "${dockerWorkspace}:/workspace:cached" `
         -v "${dockerConfigDir}:/host-claude:ro" `

@@ -645,12 +645,21 @@ cmd_up() {
         fi
     fi
 
+    # Absolute path of the project folder, used below for the claudebox.workspace
+    # label. Calcolato una volta in una variabile: non va messo inline dentro le
+    # righe di continuazione del docker run.
+    local workspace_dir
+    workspace_dir="$(pwd)"
+
     # Start container
     info "Starting container '$cname'..."
     docker run -d \
         --name "$cname" \
         --cap-add=NET_ADMIN \
         --cap-add=NET_RAW \
+        --label "claudebox.project=$proj" \
+        --label "claudebox.profile=$PROFILE" \
+        --label "claudebox.workspace=$workspace_dir" \
         ${docker_extra_opts[@]+"${docker_extra_opts[@]}"} \
         -v "$(pwd):/workspace:cached" \
         -v "${CLAUDE_CONFIG_DIR}:/host-claude:ro" \
