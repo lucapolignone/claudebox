@@ -668,9 +668,20 @@ cmd_up() {
     workspace_dir="$(pwd)"
 
     # Start container
+    #
+    # --init mette tini come PID 1 al posto di "sleep infinity". Due effetti
+    # misurabili: "docker stop" finisce subito invece di aspettare tutta la
+    # grazia e poi ammazzare (il kernel scarta i segnali diretti a un PID 1 che
+    # non ha installato un gestore, e sleep non ne installa), e i processi
+    # orfani vengono raccolti invece di accumularsi come zombie.
+    #
+    # Cosa NON fa, per non aspettarselo: tini inoltra il segnale al proprio
+    # figlio, e Claude Code non lo e' -- gira dentro un "docker exec". Fermare
+    # il container resta una morte improvvisa per lui, solo piu' rapida.
     info "Starting container '$cname'..."
     docker run -d \
         --name "$cname" \
+        --init \
         --cap-add=NET_ADMIN \
         --cap-add=NET_RAW \
         --label "claudebox.project=$proj" \

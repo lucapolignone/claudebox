@@ -749,6 +749,7 @@ function Invoke-Up {
     Write-Info "Starting container '$cname'..."
     docker run -d `
         --name $cname `
+        --init `
         --cap-add=NET_ADMIN `
         --cap-add=NET_RAW `
         --label "claudebox.project=$proj" `
