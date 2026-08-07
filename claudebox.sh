@@ -678,6 +678,13 @@ cmd_up() {
     # Cosa NON fa, per non aspettarselo: tini inoltra il segnale al proprio
     # figlio, e Claude Code non lo e' -- gira dentro un "docker exec". Fermare
     # il container resta una morte improvvisa per lui, solo piu' rapida.
+    #
+    # Le conversazioni di Claude Code stanno in ~/.claude/projects, e ~/.claude e' un
+    # volume condiviso fra tutti i progetti dello stesso profilo. La working dir e'
+    # /workspace in ogni container, quindi senza il montaggio di
+    # "claudebox-<proj>-projects" ogni progetto scriverebbe in projects/-workspace
+    # dentro lo stesso volume: le conversazioni si mescolerebbero, e un programma
+    # che ne legge una non saprebbe di chi e'.
     info "Starting container '$cname'..."
     docker run -d \
         --name "$cname" \
@@ -695,6 +702,7 @@ cmd_up() {
         -v "claudebox-shared-config-$(volume_suffix "$PROFILE"):/home/node/.claude" \
         -v "claudebox-shared-ccstatusline-$(volume_suffix "$PROFILE"):/home/node/.config/ccstatusline" \
         -v "claudebox-${proj}-history:/commandhistory" \
+        -v "claudebox-${proj}-projects:/home/node/.claude/projects" \
         -e CLAUDE_CONFIG_DIR="/home/node/.claude" \
         -e CLAUDE_PLUGINS_DIR="/home/node/.claude/plugins" \
         -e CCSTATUSLINE_CONFIG_DIR="/home/node/.config/ccstatusline" \
@@ -741,6 +749,20 @@ cmd_up() {
     docker exec -u root "$cname" chown -R node:node /home/node/.claude/plugins >/dev/null
     docker exec "$cname" bash -c \
         'cp -rn /host-claude-plugins/. /home/node/.claude/plugins/ 2>/dev/null || true' >/dev/null
+    # Il volume delle conversazioni nasce di root, e Claude Code gira come node:
+    # provato sul ferro, il primo "touch" dentro projects/ dava "Permission
+    # denied". Docker inizializza un volume nominato col contenuto dell'immagine
+    # a quel percorso, proprieta' compresa -- ma /home/node/.claude/projects
+    # nell'immagine non esiste, quindi Docker crea il punto di montaggio come
+    # root:root e il volume nuovo eredita quello.
+    #
+    # Si fa qui e non nel Dockerfile perche' un progetto gia' inizializzato ha
+    # il suo .devcontainer/Dockerfile e non lo riscarica: la riga
+    # nell'immagine curerebbe solo i progetti nuovi, e su quelli vecchi la
+    # cartella resterebbe illeggibile in silenzio. Come sopra per i plugin,
+    # serve -u root: il "sudo chown" qui sopra non puo' funzionare, perche'
+    # node ha NOPASSWD solo per init-firewall.sh.
+    docker exec -u root "$cname" chown -R node:node /home/node/.claude/projects >/dev/null
     docker exec -u root "$cname" chown -R node:node /home/node/.config/ccstatusline >/dev/null
     docker exec "$cname" bash -c \
         'if [ ! -f /home/node/.config/ccstatusline/settings.json ]; then cp -rn /host-ccstatusline/. /home/node/.config/ccstatusline/ 2>/dev/null || true; fi' >/dev/null
@@ -1038,13 +1060,16 @@ cmd_destroy() {
     proj="$(project_name)"
     cname="$(container_name)"
 
-    warn "This will remove the container, history volume and image for '$proj'."
+    warn "This will remove the container, history and projects volumes and image for '$proj'."
     echo  "  Shared volumes for profile '$PROFILE' are NOT removed."
     echo  "  To remove: docker volume rm claudebox-shared-config-$(volume_suffix \"$PROFILE\") claudebox-shared-ccstatusline-$(volume_suffix \"$PROFILE\")"
     confirm_step "Continue? [y/N] " || { info "Cancelled."; return; }
 
     container_exists && { docker rm -f "$cname" >/dev/null; ok "Container rimosso"; }
     docker volume rm "claudebox-${proj}-history" 2>/dev/null && ok "Volume history rimosso" || true
+    # Anche questo: un volume orfano per ogni progetto distrutto e' spazzatura
+    # che nessuno trova piu', e queste sono conversazioni, non cache.
+    docker volume rm "claudebox-${proj}-projects" 2>/dev/null && ok "Volume projects rimosso" || true
     docker rmi "claudebox-img-$proj" 2>/dev/null && ok "Image removed" || true
 
     echo ""
@@ -1290,7 +1315,7 @@ cmd_help() {
     up        Build image, start container, verify isolation, launch claude
     shell     Open a shell in the running container
     stop      Stop the container (without removing it)
-    destroy   Remove container, history volume and image
+    destroy   Remove container, history and projects volumes, and image
 
   GITLAB CREDENTIALS
     init/start chiede una volta sola se iniettare \$GITLAB_TOKEN e ~/.config/glab-cli

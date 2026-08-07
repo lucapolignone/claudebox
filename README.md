@@ -230,7 +230,7 @@ Dentro al devcontainer ora hai accesso a:
 | `up` | Builda immagine + avvia container + verifica isolamento + lancia claude |
 | `shell` | Apre una shell interattiva nel container in esecuzione |
 | `stop` | Ferma il container senza rimuoverlo |
-| `destroy` | Rimuove container + volume history + immagine del progetto |
+| `destroy` | Rimuove container + volumi history e projects + immagine del progetto |
 | `help` | Mostra il reference |
 
 ### Flag comuni
