@@ -1108,14 +1108,14 @@ cmd_info() {
 
     if $json_mode; then
         printf '{\n'
-        printf '  "progetto":  "%s",\n' "$(json_string "$proj")"
-        printf '  "profilo":   "%s",\n' "$(json_string "$PROFILE")"
+        printf '  "project":   "%s",\n' "$(json_string "$proj")"
+        printf '  "profile":   "%s",\n' "$(json_string "$PROFILE")"
         printf '  "container": "%s",\n' "$(json_string "$cname")"
-        printf '  "immagine":  "%s",\n' "$(json_string "$img")"
+        printf '  "image":     "%s",\n' "$(json_string "$img")"
         printf '  "volume":    "%s",\n' "$(json_string "$vol")"
         printf '  "workspace": "%s",\n' "$(json_string "$workspace")"
-        printf '  "esiste":    %s,\n' "$exists"
-        printf '  "acceso":    %s\n' "$running"
+        printf '  "exists":    %s,\n' "$exists"
+        printf '  "running":   %s\n' "$running"
         printf '}\n'
     else
         header "=== claudebox info ==="
@@ -1174,18 +1174,18 @@ _ls_emit() {
 
     if $json_mode; then
         printf '%s  {\n' "$sep"
-        printf '    "progetto":  "%s",\n' "$(json_string "$proj")"
-        if [ -n "$prof" ]; then printf '    "profilo":   "%s",\n' "$(json_string "$prof")"
-        else printf '    "profilo":   null,\n'; fi
+        printf '    "project":   "%s",\n' "$(json_string "$proj")"
+        if [ -n "$prof" ]; then printf '    "profile":   "%s",\n' "$(json_string "$prof")"
+        else printf '    "profile":   null,\n'; fi
         printf '    "container": "%s",\n' "$(json_string "$cname")"
-        if [ -n "$image" ]; then printf '    "immagine":  "%s",\n' "$(json_string "$image")"
-        else printf '    "immagine":  null,\n'; fi
+        if [ -n "$image" ]; then printf '    "image":     "%s",\n' "$(json_string "$image")"
+        else printf '    "image":     null,\n'; fi
         if [ -n "$history" ]; then printf '    "volume":    "%s",\n' "$(json_string "$history")"
         else printf '    "volume":    null,\n'; fi
         if [ -n "$workspace" ]; then printf '    "workspace": "%s",\n' "$(json_string "$workspace")"
         else printf '    "workspace": null,\n'; fi
-        printf '    "esiste":    true,\n'
-        printf '    "acceso":    %s\n' "$acceso"
+        printf '    "exists":    true,\n'
+        printf '    "running":   %s\n' "$acceso"
         printf '  }'
     else
         echo "  - $cname"

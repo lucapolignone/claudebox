@@ -1182,14 +1182,14 @@ function Invoke-Info {
         # inserimento (a differenza di una hashtable normale): necessario per
         # rispettare l'ordine dei campi del contratto.
         [pscustomobject]@{
-            progetto  = $proj
-            profilo   = $Profile
+            project   = $proj
+            profile   = $Profile
             container = $cname
-            immagine  = $img
+            image     = $img
             volume    = $vol
             workspace = $workspace
-            esiste    = [bool]$exists
-            acceso    = [bool]$running
+            exists    = [bool]$exists
+            running   = [bool]$running
         } | ConvertTo-Json
     } else {
         Write-Header "=== claudebox info ==="
@@ -1284,14 +1284,14 @@ function Invoke-Ls {
         if ([string]::IsNullOrEmpty($image)) { $image = $null }
 
         $items += [pscustomobject]@{
-            progetto  = $proj
-            profilo   = $prof
+            project   = $proj
+            profile   = $prof
             container = $cname
-            immagine  = $image
+            image     = $image
             volume    = $historyVol
             workspace = $workspace
-            esiste    = $true
-            acceso    = [bool]($obj.State.Running)
+            exists    = $true
+            running   = [bool]($obj.State.Running)
         }
     }
 
@@ -1305,12 +1305,12 @@ function Invoke-Ls {
         Write-Header "=== claudebox ls ==="
         foreach ($it in $items) {
             Write-Host "  - $($it.container)"
-            Write-Host "      Progetto  : $($it.progetto)"
-            Write-Host "      Profilo   : $(if ($it.profilo) { $it.profilo } else { '(sconosciuto)' })"
-            Write-Host "      Immagine  : $(if ($it.immagine) { $it.immagine } else { '(sconosciuta)' })"
+            Write-Host "      Progetto  : $($it.project)"
+            Write-Host "      Profilo   : $(if ($it.profile) { $it.profile } else { '(sconosciuto)' })"
+            Write-Host "      Immagine  : $(if ($it.image) { $it.image } else { '(sconosciuta)' })"
             Write-Host "      Volume    : $(if ($it.volume) { $it.volume } else { '(sconosciuto)' })"
             Write-Host "      Workspace : $(if ($it.workspace) { $it.workspace } else { '(sconosciuto)' })"
-            Write-Host "      Acceso    : $($it.acceso)"
+            Write-Host "      Acceso    : $($it.running)"
         }
     }
 }
