@@ -21,8 +21,11 @@ set -euo pipefail
 # -y / --yes flag: skip all confirmation prompts
 # --no-update / -n flag: skip automatic Claude Code update on container start
 # --detach flag: 'up' fa tutto il lavoro di preparazione ma si ferma prima
-# dell'aggancio interattivo finale (vedi cmd_up). 'start' non lo eredita
-# ancora -- e' lavoro successivo, non di questo commit.
+# dell'aggancio interattivo finale (vedi cmd_up). Lo eredita anche 'start', che
+# finisce delegando a cmd_up: 'start --detach' su una cartella nuova fa init e
+# accensione, ed esce 0 solo se il container e' davvero acceso. Il gestore delle
+# sandbox dipende da questo -- e' cio' che gli ha permesso di smettere di
+# controllare con 'docker ps' se l'avvio fosse riuscito davvero.
 AUTO_YES=false
 NO_UPDATE=false
 DETACH=false
