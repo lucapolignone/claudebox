@@ -180,6 +180,22 @@ PLAYWRIGHT_VERSION=1.49.0 ./patch-dockerfile-playwright.sh patch
 
 Comandi: `patch` (default), `remove`, `status`, `help`.
 
+### `patch-dockerfile-tmux.sh` — tmux (terminale che sopravvive)
+
+Aggiunge [tmux](https://github.com/tmux/tmux) da apt. Patch riusabile, scopribile da entrambe le location.
+
+Esiste per il **terminale nel browser** del gestore delle sandbox. Lo stream di un `docker exec` muore insieme al processo che l'ha aperto: se il gestore si riavvia, la sessione dentro al container se ne va con lui. Con tmux dentro, il server di tmux resta in piedi e la sessione con lui — alla riconnessione il gestore fa `tmux attach` invece di ricominciare.
+
+Su un container **senza** tmux il terminale funziona lo stesso: il gestore rileva tmux da solo (`command -v tmux`, la stessa domanda dello smoke test) e, quando non c'è, dichiara che la sessione non sopravvivrà al riavvio invece di prometterlo.
+
+Installa:
+
+- **`tmux`** — dai repository Debian già configurati nell'immagine Anthropic
+
+Nessuna variabile di versione: tmux è un pacchetto Debian stabile e un `attach` che funziona funziona in tutte le versioni che Debian spedisce. Aggiunge ~1 MB all'immagine.
+
+Comandi: `patch` (default), `remove`, `status`, `help`.
+
 ### `patch-dockerfile.sh` — PHP 8 + Composer + rete `yougo-dev`
 
 Patch **project-specific per yougo-dev**. Vive in project root (usa `DOCKERFILE=".devcontainer/Dockerfile"`). Installa:
@@ -431,6 +447,8 @@ Stai lanciando claudebox dall'interno della cartella `.devcontainer/`. Il nome d
 │   ├── patch-dockerfile-java.ps1       <- idem per Windows
 │   ├── patch-dockerfile-playwright.sh  <- patch riusabile (Playwright + browser)
 │   ├── patch-dockerfile-playwright.ps1 <- idem per Windows
+│   ├── patch-dockerfile-tmux.sh        <- patch riusabile (tmux, sessioni che sopravvivono)
+│   ├── patch-dockerfile-tmux.ps1       <- idem per Windows
 │   ├── patch-dockerfile-uvx.sh         <- patch riusabile (uv + uvx)
 │   ├── patch-dockerfile-uvx.ps1        <- idem per Windows
 │   ├── patch-dockerfile.sh             <- patch project-specific (PHP + rete yougo-dev)
