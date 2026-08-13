@@ -117,9 +117,21 @@ cmd_patch() {
     # questo. Quindi: heredoc quotato per il corpo, e le poche cose che vanno
     # sostituite (marker, canale) scritte fuori con printf.
     #
-    # Dentro il blocco, "\$" e' per Docker: gli dice che quel dollaro non e' un
-    # ARG suo ma della shell dentro RUN. "${NODE_CHANNEL}" senza barra, invece,
-    # e' proprio un ARG e Docker lo sostituisce.
+    # Dentro il blocco, le variabili della shell si scrivono NUDE ($file, $arch),
+    # e ${NODE_CHANNEL} no perche' e' un ARG dichiarato: misurato costruendo
+    # un'immagine, non dedotto -- $arch, $na e $file sono arrivati intatti alla
+    # shell e il canale l'ha sostituito Docker.
+    #
+    # Proteggerle con "\$" e' l'errore che sembra prudenza, e costa una build:
+    # con "\$(dpkg --print-architecture)" la barra e' arrivata fino alla shell,
+    # che dentro le virgolette l'ha letta come un dollaro letterale. "arch"
+    # valeva la stringa "$(dpkg --print-architecture)", il case cadeva sul ramo
+    # *, e il messaggio parlava di un'architettura non prevista su una amd64
+    # normalissima -- cioe' accusava la macchina di un difetto del Dockerfile.
+    #
+    # L'unico "\$" che resta e' in fondo al grep, dove il dollaro e' l'ancora
+    # di fine riga della regex: quello attraversa e funziona (provato: il
+    # sha256sum del tarball torna OK).
     {
         printf '\n%s\n' "$MARKER_BEGIN"
         printf '%s\n' "# node 22 (canale ${NODE_CHANNEL})"
@@ -140,21 +152,21 @@ USER root
 #    Il controllo sha256 prova l'integrita' del trasferimento, non la
 #    provenienza: SHASUMS256.txt viene dallo stesso host del tarball.
 RUN set -eux; \
-    arch="\$(dpkg --print-architecture)"; \
-    case "\$arch" in \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
       amd64) na=x64 ;; \
       arm64) na=arm64 ;; \
-      *) echo "architettura non prevista: \$arch" >&2; exit 1 ;; \
+      *) echo "architettura non prevista: $arch" >&2; exit 1 ;; \
     esac; \
     cd /tmp; \
     curl -fsSLO "https://nodejs.org/dist/${NODE_CHANNEL}/SHASUMS256.txt"; \
-    file="\$(grep -oE "node-v[0-9.]+-linux-\${na}[.]tar[.]gz" SHASUMS256.txt | head -n 1)"; \
-    [ -n "\$file" ] || { echo "nessun tarball linux-\${na} nel canale ${NODE_CHANNEL}" >&2; exit 1; }; \
-    curl -fsSLO "https://nodejs.org/dist/${NODE_CHANNEL}/\${file}"; \
-    grep " \${file}\$" SHASUMS256.txt | sha256sum -c -; \
-    tar -xzf "\$file" -C /usr/local --strip-components=1 --no-same-owner \
+    file="$(grep -oE "node-v[0-9.]+-linux-$na[.]tar[.]gz" SHASUMS256.txt | head -n 1)"; \
+    [ -n "$file" ] || { echo "nessun tarball linux-$na nel canale ${NODE_CHANNEL}" >&2; exit 1; }; \
+    curl -fsSLO "https://nodejs.org/dist/${NODE_CHANNEL}/$file"; \
+    grep " $file\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xzf "$file" -C /usr/local --strip-components=1 --no-same-owner \
         --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
-    rm -f "\$file" SHASUMS256.txt
+    rm -f "$file" SHASUMS256.txt
 
 # 2. Smoke test: la build fallisce se il node sul PATH non e' 22, o se npm non
 #    parte -- cioe' se l'estrazione ha lasciato l'immagine a meta'.
