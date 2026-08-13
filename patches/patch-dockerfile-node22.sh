@@ -164,17 +164,33 @@ RUN set -eux; \
     [ -n "$file" ] || { echo "nessun tarball linux-$na nel canale ${NODE_CHANNEL}" >&2; exit 1; }; \
     curl -fsSLO "https://nodejs.org/dist/${NODE_CHANNEL}/$file"; \
     grep " $file\$" SHASUMS256.txt | sha256sum -c -; \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/include/node; \
     tar -xzf "$file" -C /usr/local --strip-components=1 --no-same-owner \
         --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
     rm -f "$file" SHASUMS256.txt
 
-# 2. Smoke test: la build fallisce se il node sul PATH non e' 22, o se npm non
-#    parte -- cioe' se l'estrazione ha lasciato l'immagine a meta'.
+# 2. Smoke test: node e' 22 e npm risponde.
 RUN node -v | grep -E "^v22[.]" && npm -v
 
-# 3. Smoke test che vale piu' del primo: Claude Code e' ancora al suo posto.
-#    Sostituire il runtime sotto l'agent e' l'unico modo in cui questa patch
-#    puo' fare un danno vero, e sarebbe silenzioso fino al primo avvio.
+# 3. Smoke test che il precedente non fa, ed e' quello che conta: un'installazione
+#    VERA, piccola. Un npm meta' vecchio e meta' nuovo risponde benissimo a
+#    "npm -v" e muore alla prima "npm ci", con "Class extends value undefined"
+#    -- un messaggio che di versioni miste non parla. E' la ragione per cui la
+#    riga qui sopra rimuove il vecchio npm invece di estrarci sopra: tar
+#    sovrascrive cio' che porta e non cancella cio' che trova, quindi i file che
+#    10.8.2 aveva e 10.9.8 non ha restavano sotto a mescolarsi.
+RUN set -eux; \
+    d="$(mktemp -d)"; cd "$d"; \
+    npm init -y > /dev/null; \
+    npm install --no-audit --no-fund --loglevel=error is-number@7.0.0; \
+    node -e "process.exit(require('$d/node_modules/is-number')(7) ? 0 : 1)"; \
+    cd /; rm -rf "$d"
+
+# 4. E che Claude Code sia ancora al suo posto. Sostituire il runtime sotto
+#    l'agent e' l'unico modo in cui questa patch puo' fare un danno grosso, e
+#    sarebbe silenzioso fino al primo avvio. Sta in npm-global, che il tarball
+#    non contiene -- ma e' una cosa da verificare, non da dare per scontata.
 RUN test -x /usr/local/share/npm-global/bin/claude \
     || test -L /usr/local/share/npm-global/bin/claude
 
